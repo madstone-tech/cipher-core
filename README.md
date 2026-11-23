@@ -83,7 +83,7 @@ Tag `vX.Y.Z` and push — `.github/workflows/release.yml` runs GoReleaser:
 cross-compiled `mdstn-cipher` binaries (linux/darwin/windows, amd64/arm64 +
 macOS universal), tar.gz/zip archives, checksums, SBOM, keyless cosign
 signing (`.sigstore.json` bundles), GHCR multi-arch Docker images
-(`ghcr.io/madstone-tech/mdstn-cipher`), and SLSA build-provenance attestations
+(`ghcr.io/madstone-tech/mdstn-cipher-core`), and SLSA build-provenance attestations
 (auto-enabled on public repos).
 
 Local snapshot (no publish): `task release-snapshot`.

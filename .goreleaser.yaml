@@ -202,7 +202,7 @@ dockers_v2:
     ids: [mdstn-cipher]
     dockerfile: Dockerfile.release
     images:
-      - "ghcr.io/madstone-tech/mdstn-cipher"
+      - "ghcr.io/madstone-tech/mdstn-cipher-core"
     tags:
       - "{{ .Tag }}"
       - "v{{ .Major }}.{{ .Minor }}"
