@@ -190,10 +190,8 @@ homebrew_casks:
       shell_parameter_format: cobra
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mdstn-cipher"]
-          end
+        install_steps: |
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/mdstn-cipher"], on_macos: true
 
 # Docker images — published to GHCR as a multi-arch manifest.
 # dockers_v2 runs a single `docker buildx build` over the listed platforms,
