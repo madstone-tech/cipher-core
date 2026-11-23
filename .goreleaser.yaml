@@ -1,0 +1,240 @@
+# GoReleaser configuration for mdstn-cipher (the cipher-core CLI)
+# https://goreleaser.com
+
+version: 2
+
+# Project metadata
+project_name: mdstn-cipher
+
+# Environment variables
+env:
+  - GO111MODULE=on
+  - CGO_ENABLED=0
+
+# Git configuration
+git:
+  tag_sort: -version:refname
+
+# Build configuration
+builds:
+  - id: mdstn-cipher
+    binary: mdstn-cipher
+    main: ./cmd/mdstn-cipher
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/madstone-tech/cipher-core/cmd.version={{.Version}}
+      - -X github.com/madstone-tech/cipher-core/cmd.commit={{.Commit}}
+      - -X github.com/madstone-tech/cipher-core/cmd.buildTime={{.Date}}
+      - -X github.com/madstone-tech/cipher-core/cmd.builtBy=goreleaser
+    env:
+      - CGO_ENABLED=0
+
+# Universal binaries for macOS
+universal_binaries:
+  - id: mdstn-cipher_universal
+    replace: true
+    name_template: mdstn-cipher
+
+# Hooks
+before:
+  hooks:
+    - go mod tidy
+
+# Archives
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE*
+      - CHANGELOG*
+
+# Checksum
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# SBOMs (Syft) — one per archive, published alongside the release assets
+sboms:
+  - id: archive
+    artifacts: archive
+
+# Keyless cosign signing of the checksums file (covers every released artifact
+# transitively). Requires `id-token: write` in the workflow for OIDC, and the
+# cosign binary on PATH. cosign v3 uses the new bundle format: a single
+# checksums.txt.sigstore.json (signature + certificate + Rekor entry).
+# Verify with: cosign verify-blob --bundle checksums.txt.sigstore.json checksums.txt
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    output: true
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+
+# Snapshot builds
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# Changelog
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^style:"
+      - "merge conflict"
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+  groups:
+    - title: "New Features"
+      regexp: "^.*feat[(\\w)]*:+.*$"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^.*fix[(\\w)]*:+.*$"
+      order: 1
+    - title: "Enhancements"
+      regexp: "^.*enhance[(\\w)]*:+.*$"
+      order: 2
+    - title: "Performance Improvements"
+      regexp: "^.*perf[(\\w)]*:+.*$"
+      order: 3
+    - title: "Refactoring"
+      regexp: "^.*refactor[(\\w)]*:+.*$"
+      order: 4
+    - title: "Other"
+      order: 999
+
+# GitHub Release
+release:
+  github:
+    owner: madstone-tech
+    name: cipher-core
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## mdstn-cipher {{ .Tag }}
+
+    The CLI of the zero-knowledge encryption core. Also available as a Go
+    module: `go get github.com/madstone-tech/cipher-core@{{ .Tag }}`
+
+    ### Installation
+
+    ```bash
+    # Download the binary for your platform from the assets below
+    tar -xzf mdstn-cipher_*.tar.gz
+    sudo mv mdstn-cipher /usr/local/bin/
+
+    # Or using Go
+    go install github.com/madstone-tech/cipher-core/cmd/mdstn-cipher@{{ .Tag }}
+    ```
+
+    ### Verification
+
+    ```bash
+    mdstn-cipher --version
+    ```
+
+  footer: |
+    **Full Changelog**: https://github.com/madstone-tech/cipher-core/compare/{{ .PreviousTag }}...{{ .Tag }}
+
+    **Checksums**: {{ .Tag }}/checksums.txt
+
+# Homebrew (macOS package manager)
+# Note: no `url.verified` — deprecated in GoReleaser v2.18.1 (Homebrew dropped
+# the `verified:` cask property and verifies GitHub release URLs by default).
+homebrew_casks:
+  - repository:
+      owner: madstone-tech
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    # Don't bump the public tap on prereleases (e.g. v0.1.0-rc1) — stable tags only.
+    skip_upload: auto
+    homepage: "https://github.com/madstone-tech/cipher-core"
+    description: "File encryption and key management CLI"
+    license: "BUSL-1.1"
+    # Cobra-driven shell completions generated at install time
+    generate_completions_from_executable:
+      shell_parameter_format: cobra
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mdstn-cipher"]
+          end
+
+# Docker images — published to GHCR as a multi-arch manifest.
+# dockers_v2 runs a single `docker buildx build` over the listed platforms,
+# building and pushing the manifest plus an image SBOM. On snapshots GoReleaser
+# builds local per-arch images (arch-suffixed tags) and skips pushing.
+dockers_v2:
+  - id: mdstn-cipher
+    ids: [mdstn-cipher]
+    dockerfile: Dockerfile.release
+    images:
+      - "ghcr.io/madstone-tech/mdstn-cipher"
+    tags:
+      - "{{ .Tag }}"
+      - "v{{ .Major }}.{{ .Minor }}"
+      # latest only on stable releases — empty tag is ignored on prereleases,
+      # so an RC never repoints :latest.
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: "{{ not .IsSnapshot }}"
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "Zero-config file encryption CLI (Madstone Cipher core)"
+      org.opencontainers.image.url: "https://github.com/madstone-tech/cipher-core"
+      org.opencontainers.image.source: "https://github.com/madstone-tech/cipher-core"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: "BUSL-1.1"
+
+# Keyless cosign signing of the published images (what users pull/verify).
+# Signs by digest; requires `id-token: write` + cosign on PATH.
+docker_signs:
+  - cmd: cosign
+    output: true
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"
+
+# Announce releases
+announce:
+  skip: true

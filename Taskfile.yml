@@ -1,0 +1,162 @@
+# https://taskfile.dev
+
+version: "3"
+
+vars:
+  BINARY_NAME: mdstn-cipher
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  BUILD_TIME:
+    sh: date -u '+%Y-%m-%d_%H:%M:%S'
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the CLI binary with version metadata
+    cmds:
+      - go build -ldflags "-s -w -X github.com/madstone-tech/cipher-core/cmd.version={{.VERSION}} -X github.com/madstone-tech/cipher-core/cmd.commit=$(git rev-parse --short HEAD 2>/dev/null || echo none) -X github.com/madstone-tech/cipher-core/cmd.buildTime={{.BUILD_TIME}}" -o {{.BINARY_NAME}} ./cmd/mdstn-cipher
+
+  build:plain:
+    desc: Build without version metadata (parity with `go build ./...`)
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./... -count=1
+
+  test-verbose:
+    desc: Run tests with verbose output
+    cmds:
+      - go test -v ./...
+
+  coverage:
+    desc: Run tests with a coverage report
+    cmds:
+      - go test -cover -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+
+  verify-sdk:
+    desc: "Prove pkg/cipher is consumable from a throwaway external module (and CLI-decryptable)"
+    cmds:
+      - bash tests/external-sdk/run.sh
+
+  verify-facade:
+    desc: Assert no internal type leaks through the public facade (pkg/cipher)
+    cmds:
+      - |
+        go doc -all github.com/madstone-tech/cipher-core/pkg/cipher > /tmp/cipher-facade.txt
+        # Alias and constant DECLARATIONS may name an internal type — that is
+        # the sanctioned re-export mechanism. Anything else (a field, parameter
+        # or return type) would be unusable from outside the module.
+        if grep -nE '\b(entities|usecases|crypto)\.[A-Z]' /tmp/cipher-facade.txt \
+             | grep -vE '=[[:space:]]*(entities|usecases|crypto)\.'; then
+          echo "ERROR: internal types leak into the public facade (above)"
+          exit 1
+        fi
+        echo "facade clean"
+
+  security:
+    desc: "Security scan — gosec (blocking on high severity) + govulncheck (advisory)"
+    cmds:
+      - go run github.com/securego/gosec/v2/cmd/gosec@latest -severity=high -exclude-generated ./...
+      - cmd: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        ignore_error: true
+
+  lint:
+    desc: Run linter
+    cmds:
+      - golangci-lint run
+
+  fmt:
+    desc: Format code (gofumpt)
+    cmds:
+      - gofumpt -w .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY_NAME}}
+      - rm -f coverage.out coverage.html
+      - rm -rf dist/
+
+  install:
+    desc: Install to $GOPATH/bin (or $GOBIN)
+    deps: [build]
+    cmds:
+      - |
+        DEST="$(go env GOBIN)"
+        if [ -z "$DEST" ]; then DEST="$(go env GOPATH)/bin"; fi
+        cp {{.BINARY_NAME}} "$DEST/"
+        if [ "$(uname)" = "Darwin" ]; then
+          codesign --sign - --force --preserve-metadata=entitlements,requirements,flags,runtime "$DEST/{{.BINARY_NAME}}"
+        fi
+
+  run:
+    desc: Run the CLI (use -- to pass args)
+    deps: [build]
+    cmds:
+      - ./{{.BINARY_NAME}} {{.CLI_ARGS}}
+
+  mcp:
+    desc: Start MCP server
+    deps: [build]
+    cmds:
+      - ./{{.BINARY_NAME}} mcp
+
+  check-expiry:
+    desc: One-shot key-expiry scan over the local key database
+    deps: [build]
+    cmds:
+      - ./{{.BINARY_NAME}} check-expiry
+
+  deps:
+    desc: Download and tidy dependencies
+    cmds:
+      - go mod download
+      - go mod tidy
+      - (cd tests/external-sdk && go mod tidy)
+
+  tools:
+    desc: Install development tools
+    cmds:
+      - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+      - go install mvdan.cc/gofumpt@latest
+      - go install github.com/goreleaser/goreleaser/v2@latest
+
+  release-snapshot:
+    desc: Build a snapshot release into dist/ (no publish)
+    cmds:
+      - goreleaser release --snapshot --clean
+
+  release:
+    desc: Create and publish a release (tag push; requires release.yml or local tokens)
+    cmds:
+      - goreleaser release --clean
+
+  ci:
+    desc: Run all CI checks (mirrors .github/workflows/ci.yml)
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: vet
+      - task: test
+      - task: security
+      - task: build
+      - task: fork-boundary
+
+  fork-boundary:
+    desc: boundary gate (core imports nothing app-side)
+    cmds:
+      - go test ./internal/ -run TestMirrorBoundary -count=1 -v

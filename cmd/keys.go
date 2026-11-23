@@ -1,0 +1,560 @@
+package cmd
+
+import (
+	"bytes"
+	"context"
+	crand "crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"math/big"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"golang.org/x/term"
+
+	"github.com/madstone-tech/cipher-core/internal/adapters/cli"
+	"github.com/madstone-tech/cipher-core/internal/core/entities"
+	"github.com/madstone-tech/cipher-core/internal/core/usecases"
+)
+
+// keyJSON is one key in the JSON output of `keys create` and `keys list`.
+// It holds public metadata only: no wrapped private key and no salt.
+type keyJSON struct {
+	ID          string     `json:"id"`
+	Fingerprint string     `json:"fingerprint"`
+	PublicKey   []byte     `json:"public_key"` // base64 (encoding/json []byte)
+	Type        string     `json:"type"`
+	Alias       string     `json:"alias"`
+	IsDefault   bool       `json:"is_default"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+}
+
+func newKeyJSON(key *entities.IdentityKey) keyJSON {
+	return keyJSON{
+		ID:          key.ID,
+		Fingerprint: key.Fingerprint,
+		PublicKey:   key.PublicKey,
+		Type:        string(key.Type),
+		Alias:       key.Alias,
+		IsDefault:   key.IsDefault,
+		CreatedAt:   key.CreatedAt,
+		ExpiresAt:   key.ExpiresAt,
+	}
+}
+
+// keyCreateJSON is the JSON output of `keys create`: the key and its
+// recovery phrase.
+type keyCreateJSON struct {
+	keyJSON
+	RecoveryMnemonic        string `json:"recovery_mnemonic"`
+	RecoveryMnemonicWarning string `json:"recovery_mnemonic_warning"`
+}
+
+type KeysCommand struct {
+	dbPath     string
+	jsonOutput bool
+	verbose    bool
+
+	// stdinIsTerminal and words are the terminal seams of the recovery
+	// phrase confirmation; tests replace them.
+	stdinIsTerminal func() bool
+	words           wordPrompter
+}
+
+// wordPrompter reads one confirmation word.
+type wordPrompter interface {
+	PromptString(prompt string) (string, error)
+}
+
+func NewKeysCommand(dbPath string, jsonOutput bool, verbose bool) *KeysCommand {
+	return &KeysCommand{
+		dbPath:          dbPath,
+		jsonOutput:      jsonOutput,
+		verbose:         verbose,
+		stdinIsTerminal: func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
+		words:           cli.NewPrompter(),
+	}
+}
+
+func (c *KeysCommand) List(ctx context.Context) error {
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer adapters.Close() //nolint:errcheck // best-effort: read-only close (list only reads keys)
+
+	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
+
+	resp, err := manageKeys.ListKeys(ctx, &usecases.ListKeysRequest{
+		Filters: usecases.KeyFilters{},
+	})
+	if err != nil {
+		return err
+	}
+
+	if c.jsonOutput {
+		keys := make([]keyJSON, 0, len(resp.Keys))
+		for _, key := range resp.Keys {
+			keys = append(keys, newKeyJSON(key))
+		}
+		data, err := json.MarshalIndent(keys, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal keys: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	if len(resp.Keys) == 0 {
+		fmt.Println("No keys found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(w, "ID\tTYPE\tALIAS\tCREATED\tUSAGE\tDEFAULT\tEXPIRY"); err != nil {
+		return fmt.Errorf("failed to write keys table: %w", err)
+	}
+	for _, key := range resp.Keys {
+		defaultMark := ""
+		if key.IsDefault {
+			defaultMark = "✓"
+		}
+		expiryCol := expiryAnnotation(key)
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			key.ID,
+			key.Type,
+			key.Alias,
+			key.CreatedAt.Format("2006-01-02"),
+			key.UsageCount,
+			defaultMark,
+			expiryCol,
+		); err != nil {
+			return fmt.Errorf("failed to write keys table: %w", err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("failed to write keys table: %w", err)
+	}
+
+	return nil
+}
+
+// ANSI colour codes for expiry warnings in the list output.
+const (
+	ansiYellow = "\033[33m"
+	ansiRed    = "\033[31m"
+	ansiReset  = "\033[0m"
+)
+
+// expiryAnnotation returns a human-readable expiry annotation for the keys
+// list. Keys expiring within 1 day are shown in red; within 7 days in yellow.
+func expiryAnnotation(key *entities.IdentityKey) string {
+	if key.ExpiresAt == nil {
+		return ""
+	}
+	if key.IsExpired() {
+		return ansiRed + "EXPIRED" + ansiReset
+	}
+	daysLeft := time.Until(*key.ExpiresAt)
+	days := int(math.Ceil(daysLeft.Hours() / 24))
+	switch {
+	case days <= 1:
+		return ansiRed + fmt.Sprintf("⚠ Expires in %d day(s)", days) + ansiReset
+	case days <= 7:
+		return ansiYellow + fmt.Sprintf("⚠ Expires in %d days", days) + ansiReset
+	default:
+		return key.ExpiresAt.Format("2006-01-02")
+	}
+}
+
+// Create creates a new key. expiresIn is a human-friendly duration string
+// (e.g. "30d", "4w", "720h") and expiresAt is an RFC3339 absolute timestamp.
+// At most one may be non-empty. Both default to "" (no expiry).
+func (c *KeysCommand) Create(ctx context.Context, keyTypeStr, keyAlias, expiresIn, expiresAt, keyPassphrase string, skipConfirm bool) (retErr error) {
+	// The recovery phrase confirmation needs a terminal. Without one, fail
+	// before any key exists rather than leave an unconfirmed key behind.
+	if !skipConfirm && !c.stdinIsTerminal() {
+		return errors.New("no terminal to confirm the recovery phrase: pass --yes to skip the confirmation, and store the recovery phrase from the output")
+	}
+
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer func() {
+		if cerr := adapters.Close(); cerr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to close database: %w", cerr))
+		}
+	}()
+
+	createKey := usecases.NewCreateKey(adapters.KeyRepo, adapters.CryptoEngine, adapters.KEKProvider, adapters.SessionStore, newCLIPrompter(ctx, ""), adapters.Logger)
+
+	var kt entities.KeyType
+	switch keyTypeStr {
+	case "x25519":
+		kt = entities.KeyTypeX25519
+	default:
+		return fmt.Errorf("invalid key type: %s (must be x25519)", keyTypeStr)
+	}
+
+	// Resolve optional expiry.
+	var expires *time.Time
+	if expiresIn != "" && expiresAt != "" {
+		return fmt.Errorf("--expires-in and --expires-at are mutually exclusive")
+	}
+	if expiresIn != "" {
+		dur, err := ParseExpiryDuration(expiresIn)
+		if err != nil {
+			return fmt.Errorf("--expires-in: %w", err)
+		}
+		t := time.Now().Add(dur)
+		expires = &t
+	}
+	if expiresAt != "" {
+		t, err := time.Parse(time.RFC3339, expiresAt)
+		if err != nil {
+			return fmt.Errorf("--expires-at: expected RFC3339 format (e.g. 2026-12-31T00:00:00Z): %w", err)
+		}
+		if t.Before(time.Now()) {
+			return fmt.Errorf("--expires-at: %s is in the past", expiresAt)
+		}
+		expires = &t
+	}
+
+	// Resolve passphrase from flag or env var.
+	passphrase := keyPassphrase
+	if passphrase == "" {
+		passphrase = os.Getenv("MDSTN_KEY_PASSPHRASE")
+	}
+
+	resp, err := createKey.Execute(ctx, &usecases.CreateKeyRequest{
+		Type:       kt,
+		Alias:      keyAlias,
+		Expires:    expires,
+		Passphrase: passphrase,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !c.jsonOutput {
+		fmt.Println()
+		fmt.Println("Recovery phrase (24 words) — write this down and keep it safe:")
+		fmt.Println()
+		fmt.Println("  " + resp.Mnemonic)
+		fmt.Println()
+	}
+
+	if !skipConfirm && !c.jsonOutput {
+		if err := c.confirmPhrase(resp.Mnemonic); err != nil {
+			return discardUnconfirmedKey(ctx, adapters.KeyRepo, resp.Key.ID, err)
+		}
+		fmt.Println("Recovery phrase confirmed.")
+	}
+
+	if c.jsonOutput {
+		data, err := json.MarshalIndent(keyCreateJSON{
+			keyJSON:                 newKeyJSON(resp.Key),
+			RecoveryMnemonic:        resp.Mnemonic,
+			RecoveryMnemonicWarning: recoveryMnemonicWarning,
+		}, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal key: %w", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+
+	fmt.Printf("✓ Created %s key\n", resp.Key.Type)
+	fmt.Printf("ID: %s\n", resp.Key.ID)
+	fmt.Printf("Fingerprint: %s\n", resp.Key.Fingerprint)
+	if resp.Key.Alias != "" {
+		fmt.Printf("Alias: %s\n", resp.Key.Alias)
+	}
+	if resp.Key.ExpiresAt != nil {
+		fmt.Printf("Expires: %s\n", resp.Key.ExpiresAt.Format(time.RFC3339))
+	}
+
+	return nil
+}
+
+// confirmPhrase asks for 3 random words of mnemonic.
+func (c *KeysCommand) confirmPhrase(mnemonic string) error {
+	words := strings.Fields(mnemonic)
+	positions, err := pickThreePositions(len(words))
+	if err != nil {
+		return fmt.Errorf("failed to pick confirmation positions: %w", err)
+	}
+	for _, pos := range positions {
+		entered, err := c.words.PromptString(fmt.Sprintf("Enter word #%d: ", pos+1))
+		if err != nil {
+			return fmt.Errorf("failed to read confirmation word: %w", err)
+		}
+		if strings.TrimSpace(entered) != words[pos] {
+			return fmt.Errorf("word #%d did not match", pos+1)
+		}
+	}
+	return nil
+}
+
+// keyDeleter deletes a key by ID (usecases.KeyRepository, as `keys delete`).
+type keyDeleter interface {
+	Delete(ctx context.Context, id string) error
+}
+
+// discardUnconfirmedKey deletes the key id after its recovery phrase
+// confirmation failed with cause, so no key without a confirmed backup stays.
+// The key repository is used directly: `keys delete` refuses to delete the
+// only default key.
+func discardUnconfirmedKey(ctx context.Context, repo keyDeleter, id string, cause error) error {
+	confirmErr := fmt.Errorf("recovery phrase confirmation failed: %w", cause)
+	if err := repo.Delete(ctx, id); err != nil {
+		return errors.Join(confirmErr,
+			fmt.Errorf("failed to delete the unconfirmed key: %w", err),
+			fmt.Errorf("key %s may still exist: delete it with `keys delete %s`, then run the command again", id, id))
+	}
+	return fmt.Errorf("%w: the key was NOT kept; run the command again", confirmErr)
+}
+
+// pickThreePositions picks 3 unique random positions from [0, n) using a
+// partial Fisher-Yates shuffle with crypto/rand, returned in ascending order.
+func pickThreePositions(n int) ([]int, error) {
+	if n < 3 {
+		return []int{}, nil
+	}
+	indices := make([]int, n)
+	for i := range indices {
+		indices[i] = i
+	}
+	for i := 0; i < 3; i++ {
+		r, err := crand.Int(crand.Reader, big.NewInt(int64(n-i)))
+		if err != nil {
+			return nil, fmt.Errorf("crypto/rand: %w", err)
+		}
+		j := i + int(r.Int64())
+		indices[i], indices[j] = indices[j], indices[i]
+	}
+	result := indices[:3]
+	sort.Ints(result)
+	return result, nil
+}
+
+func (c *KeysCommand) Delete(ctx context.Context, keyID string) (retErr error) {
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer func() {
+		if cerr := adapters.Close(); cerr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to close database: %w", cerr))
+		}
+	}()
+
+	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
+
+	if err := manageKeys.DeleteKey(ctx, &usecases.DeleteKeyRequest{
+		ID: keyID,
+	}); err != nil {
+		return err
+	}
+
+	fmt.Printf("✓ Deleted key %s\n", keyID)
+	return nil
+}
+
+func (c *KeysCommand) Alias(ctx context.Context, keyID, alias string) (retErr error) {
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer func() {
+		if cerr := adapters.Close(); cerr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to close database: %w", cerr))
+		}
+	}()
+
+	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
+
+	if err := manageKeys.AliasKey(ctx, &usecases.AliasKeyRequest{
+		ID:    keyID,
+		Alias: alias,
+	}); err != nil {
+		return err
+	}
+
+	fmt.Printf("✓ Set alias '%s' for key %s\n", alias, keyID)
+	return nil
+}
+
+func (c *KeysCommand) Export(ctx context.Context, keyID, keyFormat, outputPath string) error {
+	if outputPath == "" {
+		return fmt.Errorf("output path is required (use --output)")
+	}
+
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer adapters.Close() //nolint:errcheck // best-effort: read-only close (export only reads the key)
+
+	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
+
+	resp, err := manageKeys.ExportKey(ctx, &usecases.ExportKeyRequest{
+		ID:     keyID,
+		Format: keyFormat,
+	})
+	if err != nil {
+		return err
+	}
+
+	if err := writeExport(outputPath, resp.Data, protectedKeyStores(c.dbPath)); err != nil {
+		return err
+	}
+
+	fmt.Printf("✓ Exported key to %s\n", outputPath)
+	return nil
+}
+
+func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) error {
+	if serverURL == "" {
+		serverURL = os.Getenv("CIPHER_SERVER_URL")
+	}
+	if serverURL == "" {
+		return fmt.Errorf("no server configured: use --server-url or set CIPHER_SERVER_URL")
+	}
+
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer adapters.Close() //nolint:errcheck // best-effort: read-only close (publish only reads keys)
+
+	keys, err := adapters.KeyRepo.List(ctx, usecases.KeyFilters{Type: entities.KeyTypeX25519})
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return fmt.Errorf("no X25519 key found — create one first with: cipher keys create")
+	}
+
+	var selectedKey *entities.IdentityKey
+	for _, key := range keys {
+		if key.IsDefault {
+			selectedKey = key
+			break
+		}
+	}
+	if selectedKey == nil {
+		selectedKey = keys[0]
+	}
+
+	body := map[string]string{
+		"email":      keyEmail,
+		"public_key": base64.StdEncoding.EncodeToString(selectedKey.PublicKey),
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	resp, err := http.Post(serverURL+"/api/v1/ckd/publish", "application/json", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not server-side request forgery in a local CLI context
+	if err != nil {
+		return fmt.Errorf("publish request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
+		}
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	fmt.Printf("✓ Published key for %s\n", keyEmail)
+	fmt.Printf("Key fingerprint: %s\n", selectedKey.Fingerprint)
+	return nil
+}
+
+func (c *KeysCommand) Unpublish(ctx context.Context, keyEmail, serverURL string) error {
+	if serverURL == "" {
+		serverURL = os.Getenv("CIPHER_SERVER_URL")
+	}
+	if serverURL == "" {
+		return fmt.Errorf("no server configured: use --server-url or set CIPHER_SERVER_URL")
+	}
+
+	body := map[string]string{
+		"email": keyEmail,
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("DELETE", serverURL+"/api/v1/ckd/unpublish", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
+	if err != nil {
+		return fmt.Errorf("unpublish request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
+		}
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	fmt.Printf("✓ Unpublished key for %s\n", keyEmail)
+	return nil
+}
+
+// writeExport writes data to the explicit path outputPath through the staged
+// writer: a 0600 temp file, published only when complete (a planted symlink at
+// outputPath is replaced, not followed). An explicit path replaces an existing
+// file, but never into a key database folder or over a directory (usecases.CheckOutputPath).
+func writeExport(outputPath string, data []byte, keyStores []string) error {
+	fh := cli.NewFileHandler()
+	if err := usecases.CheckOutputPath(fh, "", outputPath, keyStores); err != nil {
+		return err
+	}
+	w, err := fh.WriteStream(outputPath)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return errors.Join(fmt.Errorf("failed to write file: %w", err), w.Abort())
+	}
+	if err := w.Commit(); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	return nil
+}
+
+// protectedKeyStores returns the key databases that no CLI output may touch:
+// the one in use (--db) and the default ~/.mdstn/cipher.db (T-9).
+func protectedKeyStores(dbPath string) []string {
+	stores := []string{dbPath}
+	if home, err := os.UserHomeDir(); err == nil {
+		stores = append(stores, filepath.Join(home, ".mdstn", "cipher.db"))
+	}
+	return stores
+}

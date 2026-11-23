@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache: true
+
+      - name: Install tools
+        run: |
+          go install mvdan.cc/gofumpt@latest
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+          go install github.com/go-task/task/v3/cmd/task@latest
+
+      - name: Format check
+        run: |
+          gofumpt -l . | tee /tmp/fmt.txt
+          test ! -s /tmp/fmt.txt
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        run: golangci-lint run
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: External SDK consumer proof
+        run: bash tests/external-sdk/run.sh
+
+      - name: Public facade check (no internal type leaks)
+        run: |
+          go doc -all github.com/madstone-tech/cipher-core/pkg/cipher > /tmp/cipher-facade.txt
+          # Alias and constant DECLARATIONS may name an internal type — that is
+          # the sanctioned re-export mechanism. Anything else (a field,
+          # parameter or return type) would be unusable from outside the module.
+          if grep -nE '\b(entities|usecases|crypto)\.[A-Z]' /tmp/cipher-facade.txt \
+               | grep -vE '=[[:space:]]*(entities|usecases|crypto)\.'; then
+            echo "ERROR: internal types leak into the public facade (above)"
+            exit 1
+          fi
+          echo "facade clean"
+
+      - name: Build
+        run: go build ./...
+
+      - name: Fork boundary
+        run: go test ./internal/ -run TestMirrorBoundary -count=1 -v
+
+      - name: Secret scan
+        run: |
+          # FAIL if the tree contains hardcoded secrets (env-var indirection is allowed).
+          ! grep -rniE "password\s*=\s*['\"][^'\"$]{8,}" --include='*.go' . | grep -v "_test.go"
+          echo "secret scan OK"

@@ -1,0 +1,10 @@
+# Generated/binary
+/mdstn-cipher
+coverage.out
+/tests/external-sdk/externalsdk
+# Key backups hold wrapped private keys and salts: never commit them.
+cipher-backup-*.json
+*.exe
+*.test
+*.out
+.DS_Store

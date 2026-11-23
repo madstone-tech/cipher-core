@@ -1,0 +1,17 @@
+# Runtime image for GoReleaser-built binaries (dockers_v2 multi-platform build).
+#
+# This image only packages the prebuilt binary. dockers_v2 runs a single
+# `docker buildx build` across all platforms and stages each platform's binary
+# under $TARGETPLATFORM/ in the build context (e.g. linux/amd64/mdstn-cipher).
+# TARGETPLATFORM is supplied by buildx.
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S cipher && adduser -S cipher -G cipher
+
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/mdstn-cipher /usr/local/bin/mdstn-cipher
+
+USER cipher
+
+ENTRYPOINT ["mdstn-cipher"]
