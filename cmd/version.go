@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 )
 
 // Build variables injected via ldflags by GoReleaser.
@@ -14,6 +15,18 @@ var (
 	buildTime = "unknown"
 	builtBy   = "unknown"
 )
+
+// init falls back to the Go build-info module version when ldflags did not
+// set one: binaries built by `go install module@vX` or `go build` in module
+// mode carry the version there (GoReleaser builds stamp it via ldflags).
+func init() {
+	if version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" &&
+			info.Main.Version != "(devel)" {
+			version = info.Main.Version
+		}
+	}
+}
 
 // VersionCommand displays version information.
 type VersionCommand struct{}

@@ -57,6 +57,20 @@ header as a path, and it never replaces the input. `encrypt` never replaces `<fi
 `mdstn-cipher mcp` runs an MCP server on stdio (protocol versions 2025-06-18 and 2024-11-05). Its tools never replace a file, and none of them writes to a path that the caller
 chooses, except `encrypt_file` and `decrypt_file` with their no-replace default paths.
 
+## Install
+
+Homebrew (macOS and Linux):
+
+```bash
+brew install madstone-tech/tap/mdstn-cipher
+```
+
+The cask serves binaries built from this repo's releases
+(`github.com/madstone-tech/cipher-core`); the binary reports the release
+version in `mdstn-cipher --version`. Other paths: a checksums-verified
+direct download from the release page, the GHCR image, or
+`go install github.com/madstone-tech/cipher-core/cmd/mdstn-cipher@vX.Y.Z`.
+
 ## Using as a Go module
 
 ```sh
