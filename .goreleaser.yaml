@@ -191,7 +191,9 @@ homebrew_casks:
     hooks:
       post:
         install_steps: |
-          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/mdstn-cipher"], on_macos: true
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/mdstn-cipher"]
+          end
 
 # Docker images — published to GHCR as a multi-arch manifest.
 # dockers_v2 runs a single `docker buildx build` over the listed platforms,
