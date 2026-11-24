@@ -7,15 +7,19 @@ import (
 )
 
 var (
-	keyType       string
-	keyAlias      string
-	keyFormat     string
-	keyEmail      string
-	serverURL     string
-	keyExpiresIn  string
-	keyExpiresAt  string
-	keyPassphrase string
-	yesFlag       bool
+	keyType     string
+	keyAlias    string
+	keyFormat   string
+	keyEmail    string
+	serverURL   string
+	kdTokenFlag string
+	// publishFingerprint carries the rotation factor: the server-provided
+	// current (or tombstone) fingerprint from a 409 response.
+	publishFingerprint string
+	keyExpiresIn       string
+	keyExpiresAt       string
+	keyPassphrase      string
+	yesFlag            bool
 )
 
 // keysCmd represents the keys command
@@ -120,6 +124,25 @@ Examples:
 	RunE: runKeysUnpublish,
 }
 
+// keysStatusCmd checks a fingerprint's published state on the CKD
+var keysStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Check whether a key fingerprint is published to CKD",
+	Long: `Check the published state of a key fingerprint on the Cipher Key
+Directory (CKD).
+
+Queries the hosted directory's fingerprint index; tombstoned keys report
+published=false. Pass a 64-hex-character fingerprint: default X25519 key,
+key ID, or --fingerprint.
+
+Examples:
+  $ mdstn-cipher keys status
+  $ mdstn-cipher keys status ae216c2ef5247a3782c1...
+  $ mdstn-cipher keys status --fingerprint ae216c2e... --kd-token $KD_TOKEN`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runKeysStatus,
+}
+
 func init() {
 	rootCmd.AddCommand(keysCmd)
 	keysCmd.AddCommand(keysListCmd)
@@ -129,6 +152,7 @@ func init() {
 	keysCmd.AddCommand(keysExportCmd)
 	keysCmd.AddCommand(keysPublishCmd)
 	keysCmd.AddCommand(keysUnpublishCmd)
+	keysCmd.AddCommand(keysStatusCmd)
 
 	keysCreateCmd.Flags().StringVar(&keyType, "type", "x25519", "key type (x25519 or aes256)")
 	keysCreateCmd.Flags().StringVar(&keyAlias, "alias", "", "key alias")
@@ -142,16 +166,23 @@ func init() {
 	keysExportCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 
 	keysPublishCmd.Flags().StringVar(&keyEmail, "email", "", "your email address (required)")
-	keysPublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var)")
+	keysPublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var, then https://keys.mdstn.dev)")
+	keysPublishCmd.Flags().StringVar(&kdTokenFlag, "kd-token", "", "directory token (optional, overrides KD_TOKEN env; get one at https://keys.mdstn.dev)")
+	keysPublishCmd.Flags().StringVar(&publishFingerprint, "fingerprint", "", "current binding fingerprint for rotation or tombstone re-bind (from the 409 response)")
 	if err := keysPublishCmd.MarkFlagRequired("email"); err != nil {
 		panic(err)
 	}
 
 	keysUnpublishCmd.Flags().StringVar(&keyEmail, "email", "", "your email address (required)")
-	keysUnpublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var)")
+	keysUnpublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var, then https://keys.mdstn.dev)")
+	keysUnpublishCmd.Flags().StringVar(&kdTokenFlag, "kd-token", "", "directory token (optional, overrides KD_TOKEN env)")
 	if err := keysUnpublishCmd.MarkFlagRequired("email"); err != nil {
 		panic(err)
 	}
+
+	keysStatusCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var, then https://keys.mdstn.dev)")
+	keysStatusCmd.Flags().StringVar(&kdTokenFlag, "kd-token", "", "directory token (optional, overrides KD_TOKEN env)")
+	keysStatusCmd.Flags().StringVar(&publishFingerprint, "fingerprint", "", "fingerprint to check (overrides the positional argument and the default key)")
 }
 
 func runKeysList(cmd *cobra.Command, args []string) error {
@@ -209,12 +240,27 @@ func runKeysPublish(cmd *cobra.Command, args []string) error {
 	ctx, stop := commandContext(cmd)
 	defer stop()
 	keysCommand := NewKeysCommand(dbPath, jsonOutput, verbose)
-	return keysCommand.Publish(ctx, keyEmail, serverURL)
+	if publishFingerprint != "" {
+		return keysCommand.PublishWithTokenAndFingerprint(ctx, keyEmail, serverURL, kdTokenFlag, publishFingerprint)
+	}
+	return keysCommand.PublishWithToken(ctx, keyEmail, serverURL, kdTokenFlag)
 }
 
 func runKeysUnpublish(cmd *cobra.Command, args []string) error {
 	ctx, stop := commandContext(cmd)
 	defer stop()
 	keysCommand := NewKeysCommand(dbPath, jsonOutput, verbose)
-	return keysCommand.Unpublish(ctx, keyEmail, serverURL)
+	return keysCommand.UnpublishWithToken(ctx, keyEmail, serverURL, kdTokenFlag)
+}
+
+func runKeysStatus(cmd *cobra.Command, args []string) error {
+	ctx, stop := commandContext(cmd)
+	defer stop()
+	keysCommand := NewKeysCommand(dbPath, jsonOutput, verbose)
+	// Fingerprint precedence: --fingerprint flag > positional arg > default key.
+	fp := publishFingerprint
+	if fp == "" && len(args) > 0 {
+		fp = args[0]
+	}
+	return keysCommand.Status(ctx, serverURL, kdTokenFlag, fp)
 }

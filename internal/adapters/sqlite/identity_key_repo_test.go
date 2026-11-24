@@ -617,7 +617,7 @@ func TestIdentityKeyRepository_InMemorySharesSchema(t *testing.T) {
 			if _, err := policyRepo.ListPolicies(ctx, "owner"); err != nil {
 				errs <- err
 			}
-			if _, err := cache.Get(ctx, "nobody@example.com"); err != nil && err.Error() != "not found" {
+			if _, err := cache.Get(ctx, "nobody@example.com", ""); err != nil && err.Error() != "not found" {
 				errs <- err
 			}
 		}()

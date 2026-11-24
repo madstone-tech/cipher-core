@@ -43,6 +43,21 @@ are normative.
 
 CKD (email-based public-key discovery) is documented in [`docs/ckd-protocol.md`](docs/ckd-protocol.md).
 
+Publish to the hosted directory (keys.mdstn.dev) so others can encrypt to
+your email without out-of-band key exchange:
+
+```sh
+# one-time: verify your email at https://keys.mdstn.dev and copy the token
+mdstn-cipher keys publish --email alice@example.com --kd-token "$KD_TOKEN"
+mdstn-cipher keys status                                             # is my key published?
+mdstn-cipher keys unpublish --email alice@example.com --kd-token "$KD_TOKEN"
+```
+
+`--server-url` / `CIPHER_SERVER_URL` retarget these commands; the production
+directory is the default. A changed binding requires the server's
+`current_fingerprint` plus `--fingerprint` (the CLI surfaces it on the 409).
+`CIPHER_CKD_URL` retargets the lookup side for non-production directories.
+
 ## CLI automation
 
 The CLI runs without a terminal:

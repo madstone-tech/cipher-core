@@ -40,11 +40,13 @@ type KeyFilters struct {
 	Offset    int
 }
 
-// CKDCacheRepository manages local TOFU cache for CKD lookups
+// CKDCacheRepository manages local TOFU cache for CKD lookups.
+// Entries are keyed by (email, key type): two key types for one recipient never
+// overwrite each other. KeyType "" reads as the default type (x25519).
 type CKDCacheRepository interface {
-	Get(ctx context.Context, email string) (*CKDCacheEntry, error)
+	Get(ctx context.Context, email, keyType string) (*CKDCacheEntry, error)
 	Set(ctx context.Context, entry *CKDCacheEntry) error
-	Delete(ctx context.Context, email string) error
+	Delete(ctx context.Context, email, keyType string) error
 }
 
 // RecoveryKeyRepository stores the BIP39-derived Argon2id salt (once).
@@ -57,11 +59,16 @@ type RecoveryKeyRepository interface {
 // CKDCacheEntry represents a cached CKD lookup
 type CKDCacheEntry struct {
 	Email       string
+	KeyType     string
 	PublicKey   []byte
 	Fingerprint string
 	FirstSeen   int64
 	LastSeen    int64
 }
+
+// DefaultCKDKeyType is the key type assumed when a wire response carries no
+// key_type and the value clients publish today.
+const DefaultCKDKeyType = "x25519"
 
 // ============================================================================
 // KEY WRAPPING PORTS
@@ -213,12 +220,39 @@ type CKDPublicKey struct {
 	PublicKey   []byte
 	Fingerprint string
 	CreatedAt   int64
+	KeyType     string
 }
 
-// CKDPublisher publishes keys to CKD
+// CKDStatusResult reports one fingerprint's published state on the
+// directory (the status endpoint's shape).
+type CKDStatusResult struct {
+	Published   bool
+	Fingerprint string
+	EmailHash   string
+}
+
+// PublishResult carries the adapter's publish response: the
+// fingerprint-index hash plus the rotation/rebind flags (the wire contract's
+// PublishResponse). The adapter implements this shape; the alias keeps the
+// port free of adapter imports.
+type PublishResult struct {
+	EmailHash string
+	Rotated   bool
+	Rebound   bool
+}
+
+// CKDPublisher publishes keys to a Cipher Key Directory server with a
+// directory token. Rotation fields ride the request; conflicts (pinned
+// binding, possession checks) surface as entities.ErrKDConflict-class
+// errors that carry the server body.
 type CKDPublisher interface {
-	PublishKey(ctx context.Context, email string, publicKey []byte) error
-	UnpublishKey(ctx context.Context, email string) error
+	// Publish publishes email → publicKey. Fingerprint (when non-empty)
+	// adds the rotation artifact (fingerprint + fingerprint_token poc).
+	Publish(ctx context.Context, email string, publicKey []byte, fingerprint string) (*PublishResult, error)
+	// Unpublish removes the binding (idempotent server-side).
+	Unpublish(ctx context.Context, email string) error
+	// Status reports one fingerprint's published state.
+	Status(ctx context.Context, fingerprint string) (*CKDStatusResult, error)
 }
 
 // ============================================================================

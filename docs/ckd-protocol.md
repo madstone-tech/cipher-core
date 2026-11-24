@@ -92,6 +92,50 @@ curl -s "https://cipher.example.com/.well-known/mdstn-cipher/$HASH"
 
 ---
 
+## Signed responses (hosted directory, additive)
+
+Lookup responses from the hosted directory (`keys.mdstn.dev`) carry an
+ed25519 service signature. The self-hosted `.well-known` endpoint stays
+unsigned — clients verify signatures only on hosted-directory results.
+
+| Header | Content |
+|---|---|
+| `X-Mdstn-Kd-Signature` | base64-std ed25519 signature |
+| `X-Mdstn-Kd-Keyid` | service key id, currently `kd-2026-11` |
+
+- **Covered content**: `email_hash + "\n" + raw_response_body` (the exact
+  bytes the server sent — the signature is over the body, not the decoded
+  fields).
+- **Pinned service public key** (base64-std, 32 bytes):
+
+  ```
+  gqd2RnaBd5ZShK1AIVk5KGMzIemiQ+K2OPF3CLIASh8=
+  ```
+
+- **Client rules** (implemented in `internal/adapters/ckd/service_key.go`):
+  verify the signature before using or caching a hosted-directory lookup
+  result; compare the key id with a constant-time comparison; a missing
+  header, a failed verification, or an unrecognized key id is surfaced as an
+  integrity failure — never silently accepted and never cached. A changed key
+  id is surfaced to the user (key-rotation signal).
+- **Key rotation** (server side): publish the new public half and key id in
+  this document, then bump the id; clients surface the id change rather than
+  auto-trusting it.
+- **Forward-compatibility**: the response body may carry a `key_type` field
+  (`"x25519"` today). Clients absent-field default to `x25519`, honor a known
+  declared type, and surface an unknown type as an integrity failure (nothing
+  cached). The TOFU cache keys entries on `(email, key_type)`.
+- **Publish rotation (hosted directory)**: `POST /api/v1/ckd/publish`
+  accepts two additive fields beyond the frozen base shape — `fingerprint`
+  (hex of the key being published) and `poc` (`{"type":"fingerprint_token"}`:
+  fingerprint + current kd_token as the proof-of-possession factor). A
+  pinned binding with token-only publish answers
+  `409 {"error":"current_fingerprint_required","current_fingerprint":"…"}` —
+  the CLI surfaces the returned fingerprint so the rotation can be rebuilt;
+  it never retries automatically.
+
+---
+
 ## Future: federation (design, not yet built)
 
 > **Status:** the following is a **design**, not shipped behavior. None of the resolution

@@ -31,6 +31,20 @@ type Config struct {
 	// (default: https://keys.mdstn.dev). Empty string keeps the default.
 	CKDDirectoryURL string
 
+	// PublishServerURL overrides the publish/unpublish/status base URL
+	// (default: https://keys.mdstn.dev). Empty string keeps the default.
+	PublishServerURL string
+
+	// PublishToken is the directory token for publish and unpublish
+	// (--kd-token equivalent). Empty resolves from the KD_TOKEN environment
+	// variable; both blank leaves publish unavailable and UnpublishKey
+	// fails with guidance.
+	PublishToken string
+
+	// PublishFingerprint is the rotation factor sent with publish (the
+	// server's current or tombstone fingerprint). Blank publishes fresh.
+	PublishFingerprint string
+
 	// Logger receives structured log output. Defaults to a simple logger
 	// that writes to stderr.
 	Logger Logger
@@ -48,25 +62,27 @@ type Config struct {
 // call: two calls never share passphrase state. The key store and the session
 // cache are shared, so Lock/LockAll end every caller's unlock.
 type Client struct {
-	keyRepo      usecases.IdentityKeyRepository
-	recoveryRepo usecases.RecoveryKeyRepository
-	cryptoEngine usecases.CryptoEngine
-	kekProvider  usecases.KEKProvider
-	sessionStore *crypto.InMemorySessionStore
-	encoder      usecases.FileEncoder
-	ckdClient    usecases.CKDClient
-	ckdCache     usecases.CKDCacheRepository
-	fileHandler  usecases.FileHandler
-	logger       usecases.Logger
-	progress     usecases.ProgressReporter
-	sessionTTL   time.Duration
-	dbPath       string // key database: no output may replace it
-	createUC     *usecases.CreateKey
-	manageUC     *usecases.ManageKeys
-	lookupUC     *usecases.LookupKey
-	publishUC    *usecases.PublishKey
-	recoverUC    *usecases.RecoverKey
-	storeWrap    *usecases.StoreWrappedKey
+	keyRepo            usecases.IdentityKeyRepository
+	recoveryRepo       usecases.RecoveryKeyRepository
+	cryptoEngine       usecases.CryptoEngine
+	kekProvider        usecases.KEKProvider
+	sessionStore       *crypto.InMemorySessionStore
+	encoder            usecases.FileEncoder
+	ckdClient          usecases.CKDClient
+	ckdCache           usecases.CKDCacheRepository
+	fileHandler        usecases.FileHandler
+	logger             usecases.Logger
+	progress           usecases.ProgressReporter
+	sessionTTL         time.Duration
+	dbPath             string // key database: no output may replace it
+	createUC           *usecases.CreateKey
+	manageUC           *usecases.ManageKeys
+	lookupUC           *usecases.LookupKey
+	publishUC          *usecases.PublishKey
+	publisher          *ckd.Publisher // nil when no token source resolved
+	publishFingerprint string
+	recoverUC          *usecases.RecoverKey
+	storeWrap          *usecases.StoreWrappedKey
 
 	// closer releases the SQLite connection when Close is called.
 	closer io.Closer
@@ -152,7 +168,19 @@ func New(cfg Config) (*Client, error) {
 	)
 	c.manageUC = usecases.NewManageKeys(keyRepo, logger)
 	c.lookupUC = usecases.NewLookupKey(ckdClient, ckdCache, logger)
-	c.publishUC = usecases.NewPublishKey(nil, keyRepo, logger)
+	publisher, pubErr := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL:   cfg.PublishServerURL,
+		Token:       cfg.PublishToken,
+		Fingerprint: cfg.PublishFingerprint,
+	})
+	if pubErr != nil {
+		// No token source: publish/unpublish/status stay unavailable (the
+		// methods fail with guidance), but the rest of the SDK works.
+		publisher = nil
+	}
+	c.publisher = publisher
+	c.publishFingerprint = cfg.PublishFingerprint
+	c.publishUC = usecases.NewPublishKey(publisher, keyRepo, logger)
 	c.recoverUC = usecases.NewRecoverKey(
 		c.kekProvider, keyRepo, c.cryptoEngine, prompter, logger,
 	)

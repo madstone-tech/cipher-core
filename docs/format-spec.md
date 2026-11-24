@@ -259,6 +259,12 @@ Cost: one private-key unlock per local key (Argon2id, or the session cache), and
 | 3 | `ErrNotARecipient` | method 2: no recipient block opens with a usable local key |
 | 4 | `ErrWrongPassword` | method 3: the header MAC fails |
 
+Container decoding stops at the four classes above. The CLI's key-directory commands
+(`keys publish`, `keys unpublish`) add two classes of their own for hosted-directory
+server responses, mapped in `cmd/exit.go`: `ErrKDConflict` (exit 5, binding-state
+rejection) and `ErrKDIntegrity` (exit 6, response signature/key-id/key-type failure).
+They never apply to container bytes.
+
 **Damaged recipient block (exit 3).** A damaged `wrapped_cek` (or a damaged `ephemeral_pub_key` or `nonce` that still decodes to the right length) cannot be told apart from a block for another key, because blocks name no recipient. When the damaged block is the only block that the local key could open, the result is not a recipient (exit 3), not exit 2.
 
 **Method-3 ambiguity (exit 4).** A wrong password and a damaged header, salt, or header MAC fail the same check. The decryptor reports "wrong file password, or the file is damaged" (exit 4). After the MAC verifies, the password is proven, so a damaged body is always tamper (exit 2).
@@ -680,7 +686,7 @@ To decrypt an entry: `decrypt(mdfile, file_password=v["file_password"])` for met
 2. **Freeze.** `0x03` freezes at the first release tag that ships it: `v0.3.0` (2026-11-08). From then on, the container layout, header JSON schema, method bytes (`0x02`, `0x03`, `0x05`), KDFs and their parameters, key schedule (header MAC, payload key), AAD rule, framing rules, canonical rules (keys, base64, final frame), and error classes are normative and MUST NOT change under `0x03`.
 3. **Any semantic change after the freeze requires the next unused version byte** (`0x04`) with its own header schema: a new method byte, a new header member with required interpretation, a different AAD or MAC rule, different framing, or different KDF parameters. Readers MUST reject unknown versions with a clear error.
 4. **Byte-exactness bar.** A conforming implementation MUST decrypt every `vectors` entry of `internal/testdata/vectors.json` to its plaintext, and MUST refuse every `negative` entry and every §Tamper Contract row with its class. Adding a vector is a governance event: the generator only adds files and entries, and the committed fixtures stay byte-identical.
-5. **Error-exit parity** (normative for the reference decryptor; recommended for others): `0` ok · `1` parse/usage · `2` tamper/header-auth failure · `3` not-a-recipient · `4` wrong file password.
+5. **Error-exit parity** (normative for the reference decryptor; recommended for others): `0` ok · `1` parse/usage · `2` tamper/header-auth failure · `3` not-a-recipient · `4` wrong file password. The CLI's key-directory (CKD) commands add two classes for server responses (outside the container format): `5` binding conflict (publish/unpublish rejected on binding-state grounds; the local key store is unchanged) · `6` response integrity failure (signature, service key id, or key type checks failed; nothing was cached).
 
 ## Limitations
 

@@ -1,29 +1,27 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	crand "crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/big"
-	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"golang.org/x/term"
-
+	"github.com/madstone-tech/cipher-core/internal/adapters/ckd"
 	"github.com/madstone-tech/cipher-core/internal/adapters/cli"
 	"github.com/madstone-tech/cipher-core/internal/core/entities"
 	"github.com/madstone-tech/cipher-core/internal/core/usecases"
+
+	"golang.org/x/term"
 )
 
 // keyJSON is one key in the JSON output of `keys create` and `keys list`.
@@ -362,13 +360,18 @@ func (c *KeysCommand) Delete(ctx context.Context, keyID string) (retErr error) {
 
 	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
 
+	// Accept ID or fingerprint spellings (smoke finding 2026-11-24).
+	resolvedID, err := manageKeys.ResolveKeyRef(ctx, keyID)
+	if err != nil {
+		return err
+	}
 	if err := manageKeys.DeleteKey(ctx, &usecases.DeleteKeyRequest{
-		ID: keyID,
+		ID: resolvedID,
 	}); err != nil {
 		return err
 	}
 
-	fmt.Printf("✓ Deleted key %s\n", keyID)
+	fmt.Printf("✓ Deleted key %s\n", resolvedID)
 	return nil
 }
 
@@ -385,8 +388,13 @@ func (c *KeysCommand) Alias(ctx context.Context, keyID, alias string) (retErr er
 
 	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
 
+	// Accept ID or fingerprint spellings (smoke finding 2026-11-24).
+	resolvedID, err := manageKeys.ResolveKeyRef(ctx, keyID)
+	if err != nil {
+		return err
+	}
 	if err := manageKeys.AliasKey(ctx, &usecases.AliasKeyRequest{
-		ID:    keyID,
+		ID:    resolvedID,
 		Alias: alias,
 	}); err != nil {
 		return err
@@ -409,8 +417,14 @@ func (c *KeysCommand) Export(ctx context.Context, keyID, keyFormat, outputPath s
 
 	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
 
+	// Accept ID or fingerprint spellings (smoke finding 2026-11-24).
+	resolvedID, err := manageKeys.ResolveKeyRef(ctx, keyID)
+	if err != nil {
+		return err
+	}
+
 	resp, err := manageKeys.ExportKey(ctx, &usecases.ExportKeyRequest{
-		ID:     keyID,
+		ID:     resolvedID,
 		Format: keyFormat,
 	})
 	if err != nil {
@@ -426,11 +440,38 @@ func (c *KeysCommand) Export(ctx context.Context, keyID, keyFormat, outputPath s
 }
 
 func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) error {
-	if serverURL == "" {
-		serverURL = os.Getenv("CIPHER_SERVER_URL")
+	return c.publish(ctx, keyEmail, serverURL, "", "")
+}
+
+// PublishWithToken publishes an explicit directory token (the --kd-token flag
+// path). FR-001 precedence: flag > KD_TOKEN env > error.
+func (c *KeysCommand) PublishWithToken(ctx context.Context, keyEmail, serverURL, token string) error {
+	if token == "" {
+		token = os.Getenv("KD_TOKEN")
 	}
-	if serverURL == "" {
-		return fmt.Errorf("no server configured: use --server-url or set CIPHER_SERVER_URL")
+	return c.publish(ctx, keyEmail, serverURL, token, "")
+}
+
+// PublishWithTokenAndFingerprint sends the rotation / tombstone re-bind
+// payload: the base body plus the current (or tombstone) fingerprint and the
+// fingerprint_token proof-of-possession artifact (T009, FR-004, contract C1).
+func (c *KeysCommand) PublishWithTokenAndFingerprint(ctx context.Context, keyEmail, serverURL, token, fingerprint string) error {
+	if token == "" {
+		token = os.Getenv("KD_TOKEN")
+	}
+	return c.publish(ctx, keyEmail, serverURL, token, fingerprint)
+}
+
+// publish is the shared publish path; token resolves FR-001 precedence and
+// fingerprint (when non-empty) adds the rotation fields.
+func (c *KeysCommand) publish(ctx context.Context, keyEmail, serverURL, token, fingerprint string) error {
+	publisher, err := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL:   serverURL,
+		Token:       token,
+		Fingerprint: fingerprint,
+	})
+	if err != nil {
+		return err // no network sends without a token (FR-001)
 	}
 
 	adapters, err := NewCommonAdapters(c.dbPath)
@@ -458,27 +499,8 @@ func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) e
 		selectedKey = keys[0]
 	}
 
-	body := map[string]string{
-		"email":      keyEmail,
-		"public_key": base64.StdEncoding.EncodeToString(selectedKey.PublicKey),
-	}
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	resp, err := http.Post(serverURL+"/api/v1/ckd/publish", "application/json", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not server-side request forgery in a local CLI context
-	if err != nil {
-		return fmt.Errorf("publish request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
-		}
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+	if _, err := publisher.Publish(ctx, keyEmail, selectedKey.PublicKey, fingerprint); err != nil {
+		return err
 	}
 
 	fmt.Printf("✓ Published key for %s\n", keyEmail)
@@ -487,44 +509,102 @@ func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) e
 }
 
 func (c *KeysCommand) Unpublish(ctx context.Context, keyEmail, serverURL string) error {
-	if serverURL == "" {
-		serverURL = os.Getenv("CIPHER_SERVER_URL")
-	}
-	if serverURL == "" {
-		return fmt.Errorf("no server configured: use --server-url or set CIPHER_SERVER_URL")
-	}
+	return c.unpublishToken(ctx, keyEmail, serverURL, "")
+}
 
-	body := map[string]string{
-		"email": keyEmail,
-	}
-	bodyJSON, err := json.Marshal(body)
+// UnpublishWithToken unpublishes with an explicit token (the --kd-token flag
+// path). FR-001 precedence: flag > KD_TOKEN env > error.
+func (c *KeysCommand) UnpublishWithToken(ctx context.Context, keyEmail, serverURL, token string) error {
+	return c.unpublishToken(ctx, keyEmail, serverURL, token)
+}
+
+func (c *KeysCommand) unpublishToken(ctx context.Context, keyEmail, serverURL, token string) error {
+	publisher, err := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL: serverURL,
+		Token:     token,
+	})
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		return err // no network sends without a token (FR-001)
 	}
-
-	req, err := http.NewRequest("DELETE", serverURL+"/api/v1/ckd/unpublish", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
-	if err != nil {
-		return fmt.Errorf("unpublish request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
-		}
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+	if err := publisher.Unpublish(ctx, keyEmail); err != nil {
+		return err
 	}
 
 	fmt.Printf("✓ Unpublished key for %s\n", keyEmail)
 	return nil
+}
+
+// Status reports whether a key fingerprint is published on the hosted
+// directory (GET /api/v1/ckd/status, Bearer kd_token; live OpenAPI
+// components/schemas/StatusResponse). Fingerprint precedence: explicit
+// argument > default X25519 key from the local store. The fingerprint must be
+// 64 lowercase hex characters (the server's query pattern); a positional
+// fingerprint is normalized to lowercase before the request.
+func (c *KeysCommand) Status(ctx context.Context, serverURL, token, fingerprint string) error {
+	publisher, err := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL: serverURL,
+		Token:     token,
+	})
+	if err != nil {
+		return err // no network sends without a token (FR-001)
+	}
+
+	fp := strings.ToLower(strings.TrimSpace(fingerprint))
+	var result *usecases.CKDStatusResult
+	if fp != "" {
+		if !kdFingerprintPattern.MatchString(fp) {
+			return fmt.Errorf("invalid fingerprint %q: want 64 hex characters", fp)
+		}
+		result, err = publisher.Status(ctx, fp)
+		if err != nil {
+			return err
+		}
+	} else {
+		selected, serr := c.defaultX25519Key(ctx)
+		if serr != nil {
+			return serr
+		}
+		result, err = publisher.Status(ctx, strings.ToLower(selected.Fingerprint))
+		if err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("Fingerprint: %s\n", result.Fingerprint)
+	if result.Published {
+		fmt.Println("✓ Published")
+	} else {
+		fmt.Println("Not published (unpublished, tombstoned within 30 days, or never published)")
+	}
+	return nil
+}
+
+// kdFingerprintPattern is the server's query-side fingerprint shape
+// (OpenAPI: ^[0-9a-f]{64}$).
+var kdFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// defaultX25519Key loads the default X25519 key from the local store (the
+// same selection order as publish).
+func (c *KeysCommand) defaultX25519Key(ctx context.Context) (*entities.IdentityKey, error) {
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	defer adapters.Close() //nolint:errcheck // best-effort: read-only close (status only reads keys)
+
+	keys, err := adapters.KeyRepo.List(ctx, usecases.KeyFilters{Type: entities.KeyTypeX25519})
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no X25519 key found — create one first with: cipher keys create, or pass a fingerprint")
+	}
+	for _, key := range keys {
+		if key.IsDefault {
+			return key, nil
+		}
+	}
+	return keys[0], nil
 }
 
 // writeExport writes data to the explicit path outputPath through the staged
