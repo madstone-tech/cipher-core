@@ -15,6 +15,7 @@ type LookupKeyRequest struct {
 type LookupKeyResponse struct {
 	PublicKey   []byte
 	Fingerprint string
+	KeyType     string
 	FromCache   bool
 }
 
@@ -46,7 +47,7 @@ func (uc *LookupKey) Execute(ctx context.Context, req *LookupKeyRequest) (*Looku
 	}
 
 	// Cache hit?
-	cached, err := uc.cache.Get(ctx, req.Email)
+	cached, err := uc.cache.Get(ctx, req.Email, "")
 	if err == nil && cached != nil {
 		// Update last-seen timestamp
 		cached.LastSeen = time.Now().Unix()
@@ -57,9 +58,14 @@ func (uc *LookupKey) Execute(ctx context.Context, req *LookupKeyRequest) (*Looku
 			})
 		}
 		uc.logger.Debug("lookup key: cache hit", map[string]interface{}{"email": req.Email})
+		keyType := cached.KeyType
+		if keyType == "" {
+			keyType = DefaultCKDKeyType
+		}
 		return &LookupKeyResponse{
 			PublicKey:   cached.PublicKey,
 			Fingerprint: cached.Fingerprint,
+			KeyType:     keyType,
 			FromCache:   true,
 		}, nil
 	}
@@ -76,8 +82,13 @@ func (uc *LookupKey) Execute(ctx context.Context, req *LookupKeyRequest) (*Looku
 	}
 
 	// Write to cache
+	fetchedType := ckdKey.KeyType
+	if fetchedType == "" {
+		fetchedType = DefaultCKDKeyType
+	}
 	entry := &CKDCacheEntry{
 		Email:       req.Email,
+		KeyType:     fetchedType,
 		PublicKey:   ckdKey.PublicKey,
 		Fingerprint: ckdKey.Fingerprint,
 		FirstSeen:   time.Now().Unix(),
@@ -94,6 +105,7 @@ func (uc *LookupKey) Execute(ctx context.Context, req *LookupKeyRequest) (*Looku
 	return &LookupKeyResponse{
 		PublicKey:   ckdKey.PublicKey,
 		Fingerprint: ckdKey.Fingerprint,
+		KeyType:     fetchedType,
 		FromCache:   false,
 	}, nil
 }

@@ -7,15 +7,19 @@ import (
 )
 
 var (
-	keyType       string
-	keyAlias      string
-	keyFormat     string
-	keyEmail      string
-	serverURL     string
-	keyExpiresIn  string
-	keyExpiresAt  string
-	keyPassphrase string
-	yesFlag       bool
+	keyType     string
+	keyAlias    string
+	keyFormat   string
+	keyEmail    string
+	serverURL   string
+	kdTokenFlag string
+	// publishFingerprint carries the rotation factor: the server-provided
+	// current (or tombstone) fingerprint from a 409 response.
+	publishFingerprint string
+	keyExpiresIn       string
+	keyExpiresAt       string
+	keyPassphrase      string
+	yesFlag            bool
 )
 
 // keysCmd represents the keys command
@@ -142,13 +146,16 @@ func init() {
 	keysExportCmd.Flags().StringVarP(&outputPath, "output", "o", "", "output file path")
 
 	keysPublishCmd.Flags().StringVar(&keyEmail, "email", "", "your email address (required)")
-	keysPublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var)")
+	keysPublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var, then https://keys.mdstn.dev)")
+	keysPublishCmd.Flags().StringVar(&kdTokenFlag, "kd-token", "", "directory token (optional, overrides KD_TOKEN env; get one at https://keys.mdstn.dev)")
+	keysPublishCmd.Flags().StringVar(&publishFingerprint, "fingerprint", "", "current binding fingerprint for rotation or tombstone re-bind (from the 409 response)")
 	if err := keysPublishCmd.MarkFlagRequired("email"); err != nil {
 		panic(err)
 	}
 
 	keysUnpublishCmd.Flags().StringVar(&keyEmail, "email", "", "your email address (required)")
-	keysUnpublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var)")
+	keysUnpublishCmd.Flags().StringVar(&serverURL, "server-url", "", "server URL (optional, defaults to CIPHER_SERVER_URL env var, then https://keys.mdstn.dev)")
+	keysUnpublishCmd.Flags().StringVar(&kdTokenFlag, "kd-token", "", "directory token (optional, overrides KD_TOKEN env)")
 	if err := keysUnpublishCmd.MarkFlagRequired("email"); err != nil {
 		panic(err)
 	}
@@ -209,12 +216,15 @@ func runKeysPublish(cmd *cobra.Command, args []string) error {
 	ctx, stop := commandContext(cmd)
 	defer stop()
 	keysCommand := NewKeysCommand(dbPath, jsonOutput, verbose)
-	return keysCommand.Publish(ctx, keyEmail, serverURL)
+	if publishFingerprint != "" {
+		return keysCommand.PublishWithTokenAndFingerprint(ctx, keyEmail, serverURL, kdTokenFlag, publishFingerprint)
+	}
+	return keysCommand.PublishWithToken(ctx, keyEmail, serverURL, kdTokenFlag)
 }
 
 func runKeysUnpublish(cmd *cobra.Command, args []string) error {
 	ctx, stop := commandContext(cmd)
 	defer stop()
 	keysCommand := NewKeysCommand(dbPath, jsonOutput, verbose)
-	return keysCommand.Unpublish(ctx, keyEmail, serverURL)
+	return keysCommand.UnpublishWithToken(ctx, keyEmail, serverURL, kdTokenFlag)
 }

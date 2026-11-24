@@ -40,11 +40,13 @@ type KeyFilters struct {
 	Offset    int
 }
 
-// CKDCacheRepository manages local TOFU cache for CKD lookups
+// CKDCacheRepository manages local TOFU cache for CKD lookups.
+// Entries are keyed by (email, key type): two key types for one recipient never
+// overwrite each other. KeyType "" reads as the default type (x25519).
 type CKDCacheRepository interface {
-	Get(ctx context.Context, email string) (*CKDCacheEntry, error)
+	Get(ctx context.Context, email, keyType string) (*CKDCacheEntry, error)
 	Set(ctx context.Context, entry *CKDCacheEntry) error
-	Delete(ctx context.Context, email string) error
+	Delete(ctx context.Context, email, keyType string) error
 }
 
 // RecoveryKeyRepository stores the BIP39-derived Argon2id salt (once).
@@ -57,11 +59,16 @@ type RecoveryKeyRepository interface {
 // CKDCacheEntry represents a cached CKD lookup
 type CKDCacheEntry struct {
 	Email       string
+	KeyType     string
 	PublicKey   []byte
 	Fingerprint string
 	FirstSeen   int64
 	LastSeen    int64
 }
+
+// DefaultCKDKeyType is the key type assumed when a wire response carries no
+// key_type and the value clients publish today.
+const DefaultCKDKeyType = "x25519"
 
 // ============================================================================
 // KEY WRAPPING PORTS
@@ -213,6 +220,7 @@ type CKDPublicKey struct {
 	PublicKey   []byte
 	Fingerprint string
 	CreatedAt   int64
+	KeyType     string
 }
 
 // CKDPublisher publishes keys to CKD

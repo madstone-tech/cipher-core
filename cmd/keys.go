@@ -425,13 +425,83 @@ func (c *KeysCommand) Export(ctx context.Context, keyID, keyFormat, outputPath s
 	return nil
 }
 
+// defaultKDServerURL is the hosted Cipher Key Directory that publish and
+// unpublish target when no explicit server is configured (T007, FR-003).
+const defaultKDServerURL = "https://keys.mdstn.dev"
+
+// kdToken resolves the directory token: the explicit argument wins, then the
+// KD_TOKEN environment variable (T006, FR-001). Empty resolution is an error
+// naming both sources; nothing is sent to the network in that case.
+func kdToken(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if env := os.Getenv("KD_TOKEN"); env != "" {
+		return env, nil
+	}
+	return "", fmt.Errorf("no directory token: use --kd-token or set KD_TOKEN " +
+		"(get one at https://keys.mdstn.dev by verifying your email)")
+}
+
+// resolveKDServerURL picks the publish/unpublish target: explicit flag, then
+// CIPHER_SERVER_URL, then the hosted directory default.
+func resolveKDServerURL(serverURL string) string {
+	if serverURL != "" {
+		return serverURL
+	}
+	if env := os.Getenv("CIPHER_SERVER_URL"); env != "" {
+		return env
+	}
+	return defaultKDServerURL
+}
+
+// kdServerError turns a non-OK directory response into a classed error per
+// the exit-code mapping (T020): 401/403 auth (exit 2), 409 conflict (exit 5),
+// everything else generic (exit 1). The server body is relayed verbatim;
+// neither the token nor key material is echoed.
+func kdServerError(status int, respBody []byte) error {
+	err := fmt.Errorf("key directory returned %d: %s", status, string(respBody))
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("%w: %w", err, entities.ErrUnauthorized)
+	case http.StatusConflict:
+		return fmt.Errorf("%w: %w", err, entities.ErrKDConflict)
+	default:
+		return err
+	}
+}
+
 func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) error {
-	if serverURL == "" {
-		serverURL = os.Getenv("CIPHER_SERVER_URL")
+	return c.publish(ctx, keyEmail, serverURL, "", "")
+}
+
+// PublishWithToken publishes an explicit directory token (the --kd-token flag
+// path). FR-001 precedence: flag > KD_TOKEN env > error.
+func (c *KeysCommand) PublishWithToken(ctx context.Context, keyEmail, serverURL, token string) error {
+	if token == "" {
+		token = os.Getenv("KD_TOKEN")
 	}
-	if serverURL == "" {
-		return fmt.Errorf("no server configured: use --server-url or set CIPHER_SERVER_URL")
+	return c.publish(ctx, keyEmail, serverURL, token, "")
+}
+
+// PublishWithTokenAndFingerprint sends the rotation / tombstone re-bind
+// payload: the base body plus the current (or tombstone) fingerprint and the
+// fingerprint_token proof-of-possession artifact (T009, FR-004, contract C1).
+func (c *KeysCommand) PublishWithTokenAndFingerprint(ctx context.Context, keyEmail, serverURL, token, fingerprint string) error {
+	if token == "" {
+		token = os.Getenv("KD_TOKEN")
 	}
+	return c.publish(ctx, keyEmail, serverURL, token, fingerprint)
+}
+
+// publish is the shared publish path; token resolves FR-001 precedence and
+// fingerprint (when non-empty) adds the rotation fields.
+func (c *KeysCommand) publish(ctx context.Context, keyEmail, serverURL, token, fingerprint string) error {
+	tok, err := kdToken(token)
+	if err != nil {
+		return err // no network sends without a token (FR-001)
+	}
+	serverURL = resolveKDServerURL(serverURL)
 
 	adapters, err := NewCommonAdapters(c.dbPath)
 	if err != nil {
@@ -458,16 +528,27 @@ func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) e
 		selectedKey = keys[0]
 	}
 
-	body := map[string]string{
+	body := map[string]interface{}{
 		"email":      keyEmail,
 		"public_key": base64.StdEncoding.EncodeToString(selectedKey.PublicKey),
+	}
+	if fingerprint != "" {
+		body["fingerprint"] = fingerprint
+		body["poc"] = map[string]string{"type": "fingerprint_token"}
 	}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	resp, err := http.Post(serverURL+"/api/v1/ckd/publish", "application/json", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not server-side request forgery in a local CLI context
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/api/v1/ckd/publish", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("build publish request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok) // FR-002
+
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not server-side request forgery in a local CLI context
 	if err != nil {
 		return fmt.Errorf("publish request failed: %w", err)
 	}
@@ -478,7 +559,7 @@ func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) e
 		if rerr != nil {
 			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
 		}
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+		return kdServerError(resp.StatusCode, respBody)
 	}
 
 	fmt.Printf("✓ Published key for %s\n", keyEmail)
@@ -487,12 +568,21 @@ func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) e
 }
 
 func (c *KeysCommand) Unpublish(ctx context.Context, keyEmail, serverURL string) error {
-	if serverURL == "" {
-		serverURL = os.Getenv("CIPHER_SERVER_URL")
+	return c.unpublishToken(ctx, keyEmail, serverURL, "")
+}
+
+// UnpublishWithToken unpublishes with an explicit token (the --kd-token flag
+// path). FR-001 precedence: flag > KD_TOKEN env > error.
+func (c *KeysCommand) UnpublishWithToken(ctx context.Context, keyEmail, serverURL, token string) error {
+	return c.unpublishToken(ctx, keyEmail, serverURL, token)
+}
+
+func (c *KeysCommand) unpublishToken(ctx context.Context, keyEmail, serverURL, token string) error {
+	tok, err := kdToken(token)
+	if err != nil {
+		return err // no network sends without a token (FR-001)
 	}
-	if serverURL == "" {
-		return fmt.Errorf("no server configured: use --server-url or set CIPHER_SERVER_URL")
-	}
+	serverURL = resolveKDServerURL(serverURL)
 
 	body := map[string]string{
 		"email": keyEmail,
@@ -502,14 +592,14 @@ func (c *KeysCommand) Unpublish(ctx context.Context, keyEmail, serverURL string)
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("DELETE", serverURL+"/api/v1/ckd/unpublish", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, serverURL+"/api/v1/ckd/unpublish", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok) // FR-002
 
-	client := &http.Client{}
-	resp, err := client.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
 	if err != nil {
 		return fmt.Errorf("unpublish request failed: %w", err)
 	}
@@ -520,7 +610,7 @@ func (c *KeysCommand) Unpublish(ctx context.Context, keyEmail, serverURL string)
 		if rerr != nil {
 			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
 		}
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
+		return kdServerError(resp.StatusCode, respBody)
 	}
 
 	fmt.Printf("✓ Unpublished key for %s\n", keyEmail)

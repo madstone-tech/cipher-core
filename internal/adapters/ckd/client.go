@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/madstone-tech/cipher-core/internal/core/entities"
 	"github.com/madstone-tech/cipher-core/internal/core/usecases"
 )
 
@@ -46,22 +48,30 @@ func NewClientWithBaseURL(baseURL string) *Client {
 }
 
 // LookupKeyFromURL performs a CKD lookup against a specific URL (for testing).
+// Unsigned: tests drive the signature path through lookupFromMadstone.
 func (c *Client) LookupKeyFromURL(ctx context.Context, url, email string) (*usecases.CKDPublicKey, error) {
-	return c.fetchKey(ctx, url, email)
+	return c.fetchKey(ctx, url, email, nil)
 }
 
 // LookupKey looks up a public key via CKD protocol
 func (c *Client) LookupKey(ctx context.Context, email string) (*usecases.CKDPublicKey, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
-	// 1. Check local cache first (TOFU)
-	if cached, err := c.cache.Get(ctx, email); err == nil {
-		return &usecases.CKDPublicKey{
-			Email:       cached.Email,
-			PublicKey:   cached.PublicKey,
-			Fingerprint: cached.Fingerprint,
-			CreatedAt:   cached.FirstSeen,
-		}, nil
+	// 1. Check local cache first (TOFU). A nil cache skips the cache stages.
+	if c.cache != nil {
+		if cached, err := c.cache.Get(ctx, email, ""); err == nil {
+			keyType := cached.KeyType
+			if keyType == "" {
+				keyType = usecases.DefaultCKDKeyType
+			}
+			return &usecases.CKDPublicKey{
+				Email:       cached.Email,
+				PublicKey:   cached.PublicKey,
+				Fingerprint: cached.Fingerprint,
+				CreatedAt:   cached.FirstSeen,
+				KeyType:     keyType,
+			}, nil
+		}
 	}
 
 	// 2. Try domain CKD lookup
@@ -74,10 +84,16 @@ func (c *Client) LookupKey(ctx context.Context, email string) (*usecases.CKDPubl
 		}
 	}
 
-	// 3. Try Madstone hosted directory
-	if key, err := c.lookupFromMadstone(ctx, email); err == nil {
+	// 3. Try Madstone hosted directory. Integrity failures (tampered or
+	// unsigned responses, unknown service key id) surface instead of collapsing
+	// into "not found": a failed check is evidence, not absence (US3 acc. 2).
+	key, err := c.lookupFromMadstone(ctx, email)
+	if err == nil {
 		c.cacheKey(ctx, email, key)
 		return key, nil
+	}
+	if errors.Is(err, entities.ErrKDIntegrity) {
+		return nil, err
 	}
 
 	// 4. Not found
@@ -89,19 +105,29 @@ func (c *Client) lookupFromDomain(ctx context.Context, email, domain string) (*u
 	hash := hashEmail(email)
 	url := fmt.Sprintf("https://%s/.well-known/mdstn-cipher/%s", domain, hash)
 
-	return c.fetchKey(ctx, url, email)
+	return c.fetchKey(ctx, url, email, nil) // domain lookups unsigned (contract C3)
 }
 
-// lookupFromMadstone queries the Madstone hosted directory
+// lookupFromMadstone queries the Madstone hosted directory. Responses are
+// signature-verified before acceptance (FR-005): the madstone-only signing
+// scheme applies here, while domain lookups run unsigned per contract C3.
 func (c *Client) lookupFromMadstone(ctx context.Context, email string) (*usecases.CKDPublicKey, error) {
 	hash := hashEmail(email)
 	url := fmt.Sprintf("%s/.well-known/mdstn-cipher/%s", c.madstoneBaseURL, hash)
 
-	return c.fetchKey(ctx, url, email)
+	return c.fetchKey(ctx, url, email, &signatureCheck{emailHash: hash})
 }
 
-// fetchKey performs the HTTP request and parses the response
-func (c *Client) fetchKey(ctx context.Context, url, email string) (*usecases.CKDPublicKey, error) {
+// signatureCheck carries the signed-response verification inputs for a fetch.
+// A nil check disables verification (domain lookups, tests).
+type signatureCheck struct {
+	emailHash string // covered content = emailHash + "\n" + body
+}
+
+// fetchKey performs the HTTP request and parses the response. When sig is
+// non-nil the response must carry a valid X-Mdstn-Kd-Signature before any
+// decode or cache write happens (FR-005).
+func (c *Client) fetchKey(ctx context.Context, url, email string, sig *signatureCheck) (*usecases.CKDPublicKey, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -126,15 +152,34 @@ func (c *Client) fetchKey(ctx context.Context, url, email string) (*usecases.CKD
 		return nil, err
 	}
 
+	// Integrity gate (FR-005): verify before decode; nothing from a failed
+	// response is used or cached.
+	if sig != nil {
+		if err := verifyKDResponse(sig.emailHash, body, resp.Header.Get(HeaderSignature), resp.Header.Get(HeaderKeyID)); err != nil {
+			return nil, err
+		}
+	}
+
 	var result struct {
 		Email       string `json:"email"`
 		PublicKey   string `json:"public_key"` // base64
 		Fingerprint string `json:"fingerprint"`
 		CreatedAt   int64  `json:"created_at"`
+		KeyType     string `json:"key_type"`
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("invalid CKD response: %w", err)
+	}
+
+	// key_type handling (FR-007): absent ⇒ default; unknown ⇒ surfaced, and
+	// the response is rejected before any cache write.
+	keyType := result.KeyType
+	if keyType == "" {
+		keyType = usecases.DefaultCKDKeyType
+	}
+	if keyType != usecases.DefaultCKDKeyType {
+		return nil, fmt.Errorf("%w: response declares unsupported key type %q (supported: %q)", entities.ErrKDIntegrity, keyType, usecases.DefaultCKDKeyType)
 	}
 
 	// Decode base64 public key — the CKD response carries a base64-encoded key,
@@ -149,14 +194,19 @@ func (c *Client) fetchKey(ctx context.Context, url, email string) (*usecases.CKD
 		PublicKey:   pubKey,
 		Fingerprint: result.Fingerprint,
 		CreatedAt:   result.CreatedAt,
+		KeyType:     keyType,
 	}, nil
 }
 
 // cacheKey stores a key in the local cache
 func (c *Client) cacheKey(ctx context.Context, email string, key *usecases.CKDPublicKey) {
+	if c.cache == nil {
+		return
+	}
 	now := time.Now().Unix()
 	entry := &usecases.CKDCacheEntry{
 		Email:       email,
+		KeyType:     key.KeyType,
 		PublicKey:   key.PublicKey,
 		Fingerprint: key.Fingerprint,
 		FirstSeen:   now,

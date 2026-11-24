@@ -70,6 +70,18 @@ var (
 	// canonical X25519 key: not 32 bytes, bit 255 set, u ≥ 2^255 − 19, or a
 	// low-order point.
 	ErrInvalidRecipientKey = errors.New("invalid recipient public key")
+
+	// ErrKDConflict indicates the hosted key directory rejected a publish or
+	// unpublish because the binding state conflicts with the request (for
+	// example a current fingerprint is required, or the fingerprint does not
+	// match the stored binding). Exit code 5.
+	ErrKDConflict = errors.New("key directory binding conflict")
+
+	// ErrKDIntegrity indicates a response from the hosted key directory
+	// failed its integrity check: the response signature does not verify, the
+	// service key id is unrecognized, a signature header is missing, or the
+	// declared key type is unknown. Exit code 6.
+	ErrKDIntegrity = errors.New("key directory response failed integrity check")
 )
 
 // ChunkAuthError reports that the stream body failed at chunk Index: a GCM
