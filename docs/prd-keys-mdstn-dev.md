@@ -1,8 +1,8 @@
 # PRD — keys.mdstn.dev (Cipher Key Directory, hosted)
 
-**Status:** draft for review · **Owner:** Andhi Jeannot · **Target repo:** NEW private repo (org-owned, name TBD) · **Date:** 2026-11-24
+**Status:** draft for review · **Owner:** Andhi Jeannot · **Target repo:** `madstone-tech/ckd-server` (private) · **Date:** 2026-11-24
 
-Build decision recorded in-session: identity = any verified email · verification = loop-once → API token · overwrite = proof-of-possession · runtime = Go + Postgres in a private repo · token flow = web page · v1 = lookup + publish + verify + CLI Bearer + DNS + `key_type` · abuse set = rate + Turnstile + disposable list + no-enumeration + signed responses · done = live + CLI round-trip + load/security gates · metrics = ops only.
+Build decision recorded in-session: identity = any verified email · verification = loop-once → API token · overwrite = proof-of-possession · runtime = **Go Lambda + API Gateway + DynamoDB in a private repo** (AWS, us-east-1; cheapest-possible + minimal-maintenance) · email = AGWE (`api.email.madstone.io`) · token flow = web page · v1 = lookup + publish + verify + CLI Bearer + DNS + `key_type` · abuse set = rate + Turnstile + disposable list + no-enumeration + signed responses · done = live + CLI round-trip + load/security gates · metrics = ops only.
 
 ---
 
@@ -91,44 +91,65 @@ Rationale: possession-based rotation blocks the "register before the real user" 
 
 ## 7. Architecture
 
-Single small Go service, one Postgres.
+Single Go service on **AWS Lambda** + API Gateway HTTP API + DynamoDB (no Postgres, no VM —
+chosen for lowest cost and maintenance; see §8). One Lambda binary handles all routes.
 
 ```
-Caddy (TLS, ACME) ──> ckd-server (Go stdlib http, no framework needed at this size)
-                        ├── GET /.well-known/mdstn-cipher/{hash}   (public, rate-limited)
-                        ├── GET/POST/DELETE /api/v1/ckd/*          (Bearer, rate-limited)
-                        ├── GET/POST /verify/*                     (Turnstile, email loop)
-                        └── Postgres: published_keys(
-                              email_hash PK, email, public_key BYTEA, fingerprint,
-                              key_type TEXT DEFAULT 'x25519',
-                              created_at, verified_at, last_rotation_at,
-                              tombstone_fingerprint, tombstone_until)
-                        Mail: transactional send (Postmark/SendGrid free tier) via env-provided key
+Route53 keys.mdstn.dev ──> API Gateway HTTP API ──> Lambda (Go, single function)
+                                ├── GET  /.well-known/mdstn-cipher/{hash}   (public, rate-limited)
+                                ├── POST /api/v1/ckd/publish                (Bearer, rate-limited)
+                                ├── DELETE /api/v1/ckd/unpublish            (Bearer, rate-limited)
+                                ├── GET  /api/v1/ckd/status?fingerprint=…   (Bearer)
+                                ├── POST /verify/start                      (Turnstile-gated)
+                                └── GET  /verify/confirm?code=…             (single-use link)
+DynamoDB published_keys(
+    email_hash PK, email, public_key B64, fingerprint,
+    key_type DEFAULT 'x25519', created_at, verified_at, last_rotation_at,
+    tombstone_fingerprint, tombstone_until (TTL attr)
+) + GSI on fingerprint (status endpoint)
+Mail: AGWE (aws Lambda email microservice, api.email.madstone.io/v1/email/send
+           — Bearer AGWE_API_KEY; other Madstone services already publish via it)
+Signing: ed25519 key in AWS Secrets Manager, signature header X-Mdstn-Kd-Signature
 ```
 
 Lift from cipher-core (protocol source of truth): `hashEmail` semantics, TOFU cache expectations,
 wire JSON, `docs/ckd-protocol.md`. Lift shapes from the existing internal server implementation
-(private reference, not importable): the well-known/publish handlers, the pgx directory query set,
-TLS termination via Caddy, and the compose/ACME deploy pattern. New in this repo: token issuance,
-the rotation proof, signing, Turnstile, disposable list,
-load hardening.
+(private reference, not importable): the well-known/publish handlers, the repository query set,
+and the deploy pattern (rewired to Lambda — see §8). New in this repo: token issuance, the
+rotation proof, signing, Turnstile, disposable list, load hardening.
 
 ## 8. Infra & DNS
 
-- `keys.mdstn.dev` A/AAAA → the box (Cloudflare or the existing VPS provider);
-  Caddy auto-ACME with Let's Encrypt (per the existing Caddyfile swap path).
-- Deploy: `compose.yml` (app + caddy + postgres) + GitHub Actions CI (build, test, `goreleaser`
-  artifact, deploy on main tag — pattern copy from cipher-core's release.yml, minus casks/Docker
-  signing unless wanted).
-- Secrets in 1Password or an `.env` file: `KD_SIGNING_KEY`, SMTP key, Turnstile secret,
-  `DATABASE_URL`.
+**Fully serverless on AWS (Lambda + API Gateway HTTP API + DynamoDB + SES-via-AGWE + Route53) —
+no VPS, no VM, cheapest viable tier and near-zero maintenance.** Reuse the proven AGWE
+terraform pattern (`agwe/terraform/prod/`: same Go-Lambda, `domain.tf` ACM+Route53 idiom,
+CloudWatch alarms, S3 backend).
+
+- `terraform/`: remote state (S3 backend), modules: `wellknown` (Lambda fn URL via API Gateway
+  HTTP API + custom domain), `verification` (verify/start + confirm endpoints + mail), `dns`
+  (Route53 `keys.mdstn.dev` records in zone `Z05777392DRGF282GYXK4` — zone already exists in the
+  `mdstn` AWS profile/account, us-east-1), `email` (AGWE integration: HTTP client, not infra).
+- `keys.mdstn.dev` ACM certificate (DNS-validated, us-east-1 regional endpoints per domain.tf).
+- Public lookup: Lambda behind API Gateway custom domain; rate limiting at AGW usage plan /
+  Lambda authorizer level (per-IP). DynamoDB `published_keys` table (hash PK, GSI on
+  fingerprint for status checks; TTL attribute on tombstones).
+- Signing key: ed25519 — stored in **AWS Secrets Manager** (`/prod/ckd/KD_SIGNING_KEY`),
+  never in the image; signing done in the Lambda.
+- Token page (verify flow) — static assets served by the same Lambda (no separate stack);
+  Turnstile site key baked into the page, secret in Secrets Manager.
+- Deploy: GitHub Actions OIDC → terraform plan/apply on main tag + `goreleaser` Lambda zip
+  artifact (pattern from cipher-core's release.yml, minus casks/Docker signing).
+- Local dev secrets in `.env` (gitignored); production in Parameter Store / Secrets Manager.
+- Branding for the verify/token page: the shared `mdstn-branding` templ component
+  package via a git submodule pin (same components other Madstone UIs use).
 
 ## 9. Definition of done (the line chosen)
 
 1. Live at `https://keys.mdstn.dev` with a valid cert; `curl` round-trip works.
 2. **CLI round-trip, two machines:** machine A publishes (token from the web flow); machine B
    `encrypt --for <email> --kd <…>` resolves and encrypts; recipient decrypts.
-3. Load: lookup path ≥200 rps sustained on the target host, p99 < 50 ms, no errors in 5-min soak.
+3. Load: lookup path ≥200 rps sustained (Lambda concurrency scaling; AGW throttling accounted),
+   p99 < 100 ms cold-inclusive < 500 ms, no errors in 5-min soak.
 4. Security pass: token page reviewed (no open redirect, CSRF on verify POST, Turnstile enforced),
    no hash/email in logs or metrics, signing verifies with the published public key, negative tests
    for the rotation matrix (§5 all rows).
