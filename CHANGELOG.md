@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.4.0 (2026-11-24)
+
+### Added
+
+- Hosted Cipher Key Directory support (keys.mdstn.dev). `mdstn-cipher keys
+  publish`, `keys unpublish`, and `keys status` now target the hosted
+  directory with no configuration: the server URL defaults to
+  `https://keys.mdstn.dev` (`--server-url` / `CIPHER_SERVER_URL` still
+  override). Publish and unpublish authenticate with a Bearer directory token
+  (`--kd-token` flag, `KD_TOKEN` env; flag wins). Tokens come from the
+  email-verification page at keys.mdstn.dev and are never stored by the CLI.
+- `keys status [fingerprint]`: reports whether a fingerprint is published
+  (`published` / tombstoned `Not published`). Fingerprint resolution:
+  `--fingerprint` flag > positional argument > default X25519 key from the
+  store. Input is validated against the server's `^[0-9a-f]{64}$` pattern
+  before any request is sent.
+- Publishing a key whose binding is pinned sends the rotation artifact
+  (`fingerprint` + `poc: {"type":"fingerprint_token"}`); a token-only publish
+  against a pinned binding relays the server's `409
+  current_fingerprint_required` and surfaces the returned fingerprint so the
+  rotation can be rebuilt. The CLI never retries automatically.
+- Lookup responses from the hosted directory are signature-verified before
+  use or caching: ed25519 over `email_hash + "\n" + body`, pinned service
+  public key, constant-time key-id comparison (`X-Mdstn-Kd-Keyid`,
+  currently `kd-2026-11`). A tampered body, missing headers, or an
+  unrecognized key id fails the lookup with an integrity error and nothing is
+  cached. The service key and behavior are specified in
+  `docs/ckd-protocol.md` (Signed responses section).
+- CIPHER_CKD_URL environment variable overrides the hosted-directory base
+  URL for non-production directories (staging, local tests). Blank keeps the
+  production pin.
+
+### Changed
+
+- The local TOFU cache keys entries by `(email, key_type)` instead of email
+  alone; the cache table migrates in place on first open and old rows read
+  back as `x25519`. Response `key_type` is honored: absent means `x25519`,
+  a declared known type passes through, an unknown type fails the lookup.
+- New error classes for directory operations, with exit codes:
+  `5` binding conflict (publish/unpublish rejected on binding-state grounds;
+  the local key store is unchanged), `6` response integrity failure
+  (signature, service key id, or key type). Server authentication
+  rejections map to the existing exit `2`. The governance table in
+  `docs/format-spec.md` records the mapping; container decoding is
+  unchanged.
+
+### Breaking
+
+- The `cipherports.CKDCacheRepository` port is key-type aware
+  (`Get`/`Delete` take the type; `CKDCacheEntry` and `CKDPublicKey` carry a
+  `KeyType`). Justification: the protocol's `(email_hash, key_type)` TOFU
+  identity is now exercised by a live server; shipping the widening in the
+  same minor that introduces the need avoids a later break at 1.x.
+
+
 ## v0.3.2 (2026-11-24)
 
 ### Added
