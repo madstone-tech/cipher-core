@@ -1,5 +1,12 @@
 # cipher-core — the zero-knowledge encryption core
 
+[![CI](https://github.com/madstone-tech/cipher-core/actions/workflows/ci.yml/badge.svg)](https://github.com/madstone-tech/cipher-core/actions/workflows/ci.yml)
+[![Release](https://github.com/madstone-tech/cipher-core/actions/workflows/release.yml/badge.svg)](https://github.com/madstone-tech/cipher-core/actions/workflows/release.yml)
+[![Release version](https://img.shields.io/github/v/release/madstone-tech/cipher-core?sort=semver)](https://github.com/madstone-tech/cipher-core/releases/latest)
+[![Go Reference](https://pkg.go.dev/badge/github.com/madstone-tech/cipher-core.svg)](https://pkg.go.dev/github.com/madstone-tech/cipher-core)
+[![License](https://img.shields.io/badge/license-BSL%201.1-informational)](./LICENSE)
+[![Security](https://img.shields.io/badge/security-see%20SECURITY.md-blue)](./SECURITY.md)
+
 The format/crypto/storage core of [Madstone Cipher](https://madstone.io) as a
 standalone Go module.
 
