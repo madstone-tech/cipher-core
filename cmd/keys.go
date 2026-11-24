@@ -12,8 +12,10 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -615,6 +617,98 @@ func (c *KeysCommand) unpublishToken(ctx context.Context, keyEmail, serverURL, t
 
 	fmt.Printf("✓ Unpublished key for %s\n", keyEmail)
 	return nil
+}
+
+// Status reports whether a key fingerprint is published on the hosted
+// directory (GET /api/v1/ckd/status, Bearer kd_token; live OpenAPI
+// components/schemas/StatusResponse). Fingerprint precedence: explicit
+// argument > default X25519 key from the local store. The fingerprint must be
+// 64 lowercase hex characters (the server's query pattern); a positional
+// fingerprint is normalized to lowercase before the request.
+func (c *KeysCommand) Status(ctx context.Context, serverURL, token, fingerprint string) error {
+	tok, err := kdToken(token)
+	if err != nil {
+		return err // no network sends without a token (FR-001)
+	}
+	serverURL = resolveKDServerURL(serverURL)
+
+	fp := strings.ToLower(strings.TrimSpace(fingerprint))
+	if fp != "" && !kdFingerprintPattern.MatchString(fp) {
+		return fmt.Errorf("invalid fingerprint %q: want 64 hex characters", fp)
+	}
+	if fp == "" {
+		selected, err := c.defaultX25519Key(ctx)
+		if err != nil {
+			return err
+		}
+		fp = strings.ToLower(selected.Fingerprint)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		serverURL+"/api/v1/ckd/status?fingerprint="+url.PathEscape(fp), nil) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("status request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return kdServerError(resp.StatusCode, body)
+	}
+
+	var result struct {
+		Published   bool   `json:"published"`
+		Fingerprint string `json:"fingerprint"`
+		EmailHash   string `json:"email_hash"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("invalid status response: %w", err)
+	}
+
+	fmt.Printf("Fingerprint: %s\n", result.Fingerprint)
+	if result.Published {
+		fmt.Println("✓ Published")
+	} else {
+		fmt.Println("Not published (unpublished, tombstoned within 30 days, or never published)")
+	}
+	return nil
+}
+
+// kdFingerprintPattern is the server's query-side fingerprint shape
+// (OpenAPI: ^[0-9a-f]{64}$).
+var kdFingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// defaultX25519Key loads the default X25519 key from the local store (the
+// same selection order as publish).
+func (c *KeysCommand) defaultX25519Key(ctx context.Context) (*entities.IdentityKey, error) {
+	adapters, err := NewCommonAdapters(c.dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	defer adapters.Close() //nolint:errcheck // best-effort: read-only close (status only reads keys)
+
+	keys, err := adapters.KeyRepo.List(ctx, usecases.KeyFilters{Type: entities.KeyTypeX25519})
+	if err != nil {
+		return nil, err
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no X25519 key found — create one first with: cipher keys create, or pass a fingerprint")
+	}
+	for _, key := range keys {
+		if key.IsDefault {
+			return key, nil
+		}
+	}
+	return keys[0], nil
 }
 
 // writeExport writes data to the explicit path outputPath through the staged
