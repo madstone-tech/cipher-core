@@ -54,7 +54,7 @@ These are documented design decisions, not vulnerabilities (`docs/format-spec.md
 - Denial of service by giving unusually large or malformed input where the code bounds
   the damage (we still want to hear about *missing* bounds).
 - Reports about other Madstone products (`ghcr.io/madstone-tech/mdstn-cipher`,
-  the closed-source app). Those have their own process.
+  the hosted application) have their own process.
 
 ## Disclosure
 
