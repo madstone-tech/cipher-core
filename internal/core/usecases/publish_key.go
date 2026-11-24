@@ -13,14 +13,17 @@ import (
 // KeyID can alternatively be supplied to let the usecase fetch the key
 // from the repository.
 type PublishKeyRequest struct {
-	Email     string
-	PublicKey []byte // Raw public key bytes (preferred)
-	KeyID     string // Alternative: look up key by ID (used if PublicKey is nil)
+	Email       string
+	PublicKey   []byte // Raw public key bytes (preferred)
+	KeyID       string // Alternative: look up key by ID (used if PublicKey is nil)
+	Fingerprint string // Rotation factor: the server's current (or tombstone) fingerprint; blank = fresh publish
 }
 
 // PublishKeyResponse contains the result of publishing a key.
 type PublishKeyResponse struct {
 	EmailHash string
+	Rotated   bool // the call replaced an existing binding
+	Rebound   bool // the call cleared a tombstone inside the window
 }
 
 // PublishKey publishes a user's public key to the CKD network.
@@ -63,7 +66,8 @@ func (uc *PublishKey) Execute(ctx context.Context, req *PublishKeyRequest) (*Pub
 		publicKey = key.PublicKey
 	}
 
-	if err := uc.publisher.PublishKey(ctx, req.Email, publicKey); err != nil {
+	resp, err := uc.publisher.Publish(ctx, req.Email, publicKey, req.Fingerprint)
+	if err != nil {
 		uc.logger.Error("publish key: CKD publish failed", map[string]interface{}{
 			"email": req.Email,
 			"error": err.Error(),
@@ -77,7 +81,11 @@ func (uc *PublishKey) Execute(ctx context.Context, req *PublishKeyRequest) (*Pub
 		"email_hash": emailHash,
 	})
 
-	return &PublishKeyResponse{EmailHash: emailHash}, nil
+	return &PublishKeyResponse{
+		EmailHash: emailHash,
+		Rotated:   resp.Rotated,
+		Rebound:   resp.Rebound,
+	}, nil
 }
 
 // publishKeyHashEmail returns the SHA-256 hex of the lowercase-trimmed email.

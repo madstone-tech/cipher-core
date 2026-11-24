@@ -15,6 +15,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/madstone-tech/cipher-core/internal/adapters/ckd"
 	"github.com/madstone-tech/cipher-core/internal/core/usecases"
 )
 
@@ -181,6 +182,10 @@ type (
 	PublishKeyRequest = usecases.PublishKeyRequest
 	// CKDPublisher stores published public keys.
 	CKDPublisher = usecases.CKDPublisher
+	// CKDStatusResult is one fingerprint's published state.
+	CKDStatusResult = usecases.CKDStatusResult
+	// PublisherConfig resolves the directory publisher inputs (CLI + SDK).
+	PublisherConfig = ckd.PublisherConfig
 	// StoreWrappedKey stores a client-wrapped private key (ZK web flow).
 	StoreWrappedKey = usecases.StoreWrappedKey
 	// StoreWrappedKeyRequest is a wrapped-key store request.

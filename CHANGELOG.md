@@ -34,6 +34,14 @@
 - `keys export`, `keys alias`, and `keys delete` accept a full fingerprint
   (upper- or lowercase) as the key reference, not only the internal ID — the
   same spelling the encrypt recipient positionals accept.
+- SDK parity for the directory (pkg/cipher, matching the CLI): `PublishKey`
+  actually publishes (it previously had no transport wired and would panic),
+  returns a `PublishInfo` (hash + rotated/rebound), and `UnpublishKey` /
+  `KeyStatus` are new. Configuration rides `Config`: `PublishServerURL`,
+  `PublishToken`, `PublishFingerprint` (rotation factor). Without a token
+  the three methods fail with guidance and the rest of the SDK keeps
+  working. `PublishServerURL`/`PublishToken` default to the same
+  environment variables the CLI reads.
 
 ### Changed
 
@@ -56,6 +64,12 @@
   `KeyType`). Justification: the protocol's `(email_hash, key_type)` TOFU
   identity is now exercised by a live server; shipping the widening in the
   same minor that introduces the need avoids a later break at 1.x.
+- The `cipherports.CKDPublisher` port now models the directory's real
+  contract: `Publish` carries the rotation fingerprint and returns the
+  publish result (hash + rotated/rebound flags), and `Status` reports the
+  published state. Implementers of the old two-method port must add the new
+  methods; the wire transport lives in `internal/adapters/ckd.Publisher`,
+  shared by the CLI and the SDK (v0.4.0 parity).
 
 
 ## v0.3.2 (2026-11-24)

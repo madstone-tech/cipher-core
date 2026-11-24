@@ -1,18 +1,13 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	crand "crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/big"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,11 +16,12 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"golang.org/x/term"
-
+	"github.com/madstone-tech/cipher-core/internal/adapters/ckd"
 	"github.com/madstone-tech/cipher-core/internal/adapters/cli"
 	"github.com/madstone-tech/cipher-core/internal/core/entities"
 	"github.com/madstone-tech/cipher-core/internal/core/usecases"
+
+	"golang.org/x/term"
 )
 
 // keyJSON is one key in the JSON output of `keys create` and `keys list`.
@@ -443,52 +439,6 @@ func (c *KeysCommand) Export(ctx context.Context, keyID, keyFormat, outputPath s
 	return nil
 }
 
-// defaultKDServerURL is the hosted Cipher Key Directory that publish and
-// unpublish target when no explicit server is configured (T007, FR-003).
-const defaultKDServerURL = "https://keys.mdstn.dev"
-
-// kdToken resolves the directory token: the explicit argument wins, then the
-// KD_TOKEN environment variable (T006, FR-001). Empty resolution is an error
-// naming both sources; nothing is sent to the network in that case.
-func kdToken(explicit string) (string, error) {
-	if explicit != "" {
-		return explicit, nil
-	}
-	if env := os.Getenv("KD_TOKEN"); env != "" {
-		return env, nil
-	}
-	return "", fmt.Errorf("no directory token: use --kd-token or set KD_TOKEN " +
-		"(get one at https://keys.mdstn.dev by verifying your email)")
-}
-
-// resolveKDServerURL picks the publish/unpublish target: explicit flag, then
-// CIPHER_SERVER_URL, then the hosted directory default.
-func resolveKDServerURL(serverURL string) string {
-	if serverURL != "" {
-		return serverURL
-	}
-	if env := os.Getenv("CIPHER_SERVER_URL"); env != "" {
-		return env
-	}
-	return defaultKDServerURL
-}
-
-// kdServerError turns a non-OK directory response into a classed error per
-// the exit-code mapping (T020): 401/403 auth (exit 2), 409 conflict (exit 5),
-// everything else generic (exit 1). The server body is relayed verbatim;
-// neither the token nor key material is echoed.
-func kdServerError(status int, respBody []byte) error {
-	err := fmt.Errorf("key directory returned %d: %s", status, string(respBody))
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("%w: %w", err, entities.ErrUnauthorized)
-	case http.StatusConflict:
-		return fmt.Errorf("%w: %w", err, entities.ErrKDConflict)
-	default:
-		return err
-	}
-}
-
 func (c *KeysCommand) Publish(ctx context.Context, keyEmail, serverURL string) error {
 	return c.publish(ctx, keyEmail, serverURL, "", "")
 }
@@ -515,11 +465,14 @@ func (c *KeysCommand) PublishWithTokenAndFingerprint(ctx context.Context, keyEma
 // publish is the shared publish path; token resolves FR-001 precedence and
 // fingerprint (when non-empty) adds the rotation fields.
 func (c *KeysCommand) publish(ctx context.Context, keyEmail, serverURL, token, fingerprint string) error {
-	tok, err := kdToken(token)
+	publisher, err := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL:   serverURL,
+		Token:       token,
+		Fingerprint: fingerprint,
+	})
 	if err != nil {
 		return err // no network sends without a token (FR-001)
 	}
-	serverURL = resolveKDServerURL(serverURL)
 
 	adapters, err := NewCommonAdapters(c.dbPath)
 	if err != nil {
@@ -546,38 +499,8 @@ func (c *KeysCommand) publish(ctx context.Context, keyEmail, serverURL, token, f
 		selectedKey = keys[0]
 	}
 
-	body := map[string]interface{}{
-		"email":      keyEmail,
-		"public_key": base64.StdEncoding.EncodeToString(selectedKey.PublicKey),
-	}
-	if fingerprint != "" {
-		body["fingerprint"] = fingerprint
-		body["poc"] = map[string]string{"type": "fingerprint_token"}
-	}
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL+"/api/v1/ckd/publish", bytes.NewReader(bodyJSON))
-	if err != nil {
-		return fmt.Errorf("build publish request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+tok) // FR-002
-
-	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not server-side request forgery in a local CLI context
-	if err != nil {
-		return fmt.Errorf("publish request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
-		}
-		return kdServerError(resp.StatusCode, respBody)
+	if _, err := publisher.Publish(ctx, keyEmail, selectedKey.PublicKey, fingerprint); err != nil {
+		return err
 	}
 
 	fmt.Printf("✓ Published key for %s\n", keyEmail)
@@ -596,39 +519,15 @@ func (c *KeysCommand) UnpublishWithToken(ctx context.Context, keyEmail, serverUR
 }
 
 func (c *KeysCommand) unpublishToken(ctx context.Context, keyEmail, serverURL, token string) error {
-	tok, err := kdToken(token)
+	publisher, err := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL: serverURL,
+		Token:     token,
+	})
 	if err != nil {
 		return err // no network sends without a token (FR-001)
 	}
-	serverURL = resolveKDServerURL(serverURL)
-
-	body := map[string]string{
-		"email": keyEmail,
-	}
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, serverURL+"/api/v1/ckd/unpublish", bytes.NewReader(bodyJSON)) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+tok) // FR-002
-
-	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
-	if err != nil {
-		return fmt.Errorf("unpublish request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return errors.Join(fmt.Errorf("server returned %d", resp.StatusCode), fmt.Errorf("read response body: %w", rerr))
-		}
-		return kdServerError(resp.StatusCode, respBody)
+	if err := publisher.Unpublish(ctx, keyEmail); err != nil {
+		return err
 	}
 
 	fmt.Printf("✓ Unpublished key for %s\n", keyEmail)
@@ -642,52 +541,33 @@ func (c *KeysCommand) unpublishToken(ctx context.Context, keyEmail, serverURL, t
 // 64 lowercase hex characters (the server's query pattern); a positional
 // fingerprint is normalized to lowercase before the request.
 func (c *KeysCommand) Status(ctx context.Context, serverURL, token, fingerprint string) error {
-	tok, err := kdToken(token)
+	publisher, err := ckd.NewPublisher(ckd.PublisherConfig{
+		ServerURL: serverURL,
+		Token:     token,
+	})
 	if err != nil {
 		return err // no network sends without a token (FR-001)
 	}
-	serverURL = resolveKDServerURL(serverURL)
 
 	fp := strings.ToLower(strings.TrimSpace(fingerprint))
-	if fp != "" && !kdFingerprintPattern.MatchString(fp) {
-		return fmt.Errorf("invalid fingerprint %q: want 64 hex characters", fp)
-	}
-	if fp == "" {
-		selected, err := c.defaultX25519Key(ctx)
+	var result *usecases.CKDStatusResult
+	if fp != "" {
+		if !kdFingerprintPattern.MatchString(fp) {
+			return fmt.Errorf("invalid fingerprint %q: want 64 hex characters", fp)
+		}
+		result, err = publisher.Status(ctx, fp)
 		if err != nil {
 			return err
 		}
-		fp = strings.ToLower(selected.Fingerprint)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		serverURL+"/api/v1/ckd/status?fingerprint="+url.PathEscape(fp), nil) // #nosec G704 -- CLI request to a user-supplied server URL; not SSRF in a local CLI context
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("status request failed: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort: read-only close
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return kdServerError(resp.StatusCode, body)
-	}
-
-	var result struct {
-		Published   bool   `json:"published"`
-		Fingerprint string `json:"fingerprint"`
-		EmailHash   string `json:"email_hash"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return fmt.Errorf("invalid status response: %w", err)
+	} else {
+		selected, serr := c.defaultX25519Key(ctx)
+		if serr != nil {
+			return serr
+		}
+		result, err = publisher.Status(ctx, strings.ToLower(selected.Fingerprint))
+		if err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("Fingerprint: %s\n", result.Fingerprint)

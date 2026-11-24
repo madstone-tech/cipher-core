@@ -223,10 +223,36 @@ type CKDPublicKey struct {
 	KeyType     string
 }
 
-// CKDPublisher publishes keys to CKD
+// CKDStatusResult reports one fingerprint's published state on the
+// directory (the status endpoint's shape).
+type CKDStatusResult struct {
+	Published   bool
+	Fingerprint string
+	EmailHash   string
+}
+
+// PublishResult carries the adapter's publish response: the
+// fingerprint-index hash plus the rotation/rebind flags (the wire contract's
+// PublishResponse). The adapter implements this shape; the alias keeps the
+// port free of adapter imports.
+type PublishResult struct {
+	EmailHash string
+	Rotated   bool
+	Rebound   bool
+}
+
+// CKDPublisher publishes keys to a Cipher Key Directory server with a
+// directory token. Rotation fields ride the request; conflicts (pinned
+// binding, possession checks) surface as entities.ErrKDConflict-class
+// errors that carry the server body.
 type CKDPublisher interface {
-	PublishKey(ctx context.Context, email string, publicKey []byte) error
-	UnpublishKey(ctx context.Context, email string) error
+	// Publish publishes email → publicKey. Fingerprint (when non-empty)
+	// adds the rotation artifact (fingerprint + fingerprint_token poc).
+	Publish(ctx context.Context, email string, publicKey []byte, fingerprint string) (*PublishResult, error)
+	// Unpublish removes the binding (idempotent server-side).
+	Unpublish(ctx context.Context, email string) error
+	// Status reports one fingerprint's published state.
+	Status(ctx context.Context, fingerprint string) (*CKDStatusResult, error)
 }
 
 // ============================================================================
