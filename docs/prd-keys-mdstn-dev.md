@@ -1,6 +1,6 @@
 # PRD — keys.mdstn.dev (Cipher Key Directory, hosted)
 
-**Status:** draft for review · **Owner:** Andhi Jeannot · **Target repo:** NEW private repo (`madstone-tech/ckd-directory` placeholder name) · **Date:** 2026-11-24
+**Status:** draft for review · **Owner:** Andhi Jeannot · **Target repo:** NEW private repo (org-owned, name TBD) · **Date:** 2026-11-24
 
 Build decision recorded in-session: identity = any verified email · verification = loop-once → API token · overwrite = proof-of-possession · runtime = Go + Postgres in a private repo · token flow = web page · v1 = lookup + publish + verify + CLI Bearer + DNS + `key_type` · abuse set = rate + Turnstile + disposable list + no-enumeration + signed responses · done = live + CLI round-trip + load/security gates · metrics = ops only.
 
@@ -15,8 +15,8 @@ local TOFU cache → recipient's domain → Madstone hosted directory (`internal
 orgs can already serve their own addresses. **Everyone on a personal mailbox cannot discover anyone,
 and nobody can discover them.** The protocol for this directory already exists and is normative:
 `cipher-core/docs/ckd-protocol.md` ("What CKD is (built today)" + wire format). This PRD covers
-standing up the Madstone-run directory as a **standalone service, separate from the closed-source
-app** (../cipher), per the protocol doc's own extraction note (§ "the directory can be extracted
+standing up the hosted directory as a **standalone service**, per the protocol doc's own extraction
+note (§ "the directory can be extracted
 into a shared identity-discovery service without a breaking schema change").
 
 Out of scope (later phases, same repo): federation pointer-registry mode, key transparency log.
@@ -107,20 +107,20 @@ Caddy (TLS, ACME) ──> ckd-server (Go stdlib http, no framework needed at thi
 ```
 
 Lift from cipher-core (protocol source of truth): `hashEmail` semantics, TOFU cache expectations,
-wire JSON, `docs/ckd-protocol.md`. Lift from ../cipher (read-only reference — do NOT import the
-module): handler shapes (`internal/api/ckd_handler.go`), pgx `CKDRepository` query set
-(`internal/adapters/postgres/ckd_repo.go`), Caddyfile TLS patterns (`Caddyfile`), compose + ACME
-swap. New in this repo: token issuance, the rotation proof, signing, Turnstile, disposable list,
+wire JSON, `docs/ckd-protocol.md`. Lift shapes from the existing internal server implementation
+(private reference, not importable): the well-known/publish handlers, the pgx directory query set,
+TLS termination via Caddy, and the compose/ACME deploy pattern. New in this repo: token issuance,
+the rotation proof, signing, Turnstile, disposable list,
 load hardening.
 
 ## 8. Infra & DNS
 
-- `keys.mdstn.dev` A/AAAA → the box (Cloudflare or the existing VPS at `144.217.162.48`'s provider);
+- `keys.mdstn.dev` A/AAAA → the box (Cloudflare or the existing VPS provider);
   Caddy auto-ACME with Let's Encrypt (per the existing Caddyfile swap path).
 - Deploy: `compose.yml` (app + caddy + postgres) + GitHub Actions CI (build, test, `goreleaser`
   artifact, deploy on main tag — pattern copy from cipher-core's release.yml, minus casks/Docker
   signing unless wanted).
-- Secrets in 1Password/`cipher.env`-style file: `KD_SIGNING_KEY`, SMTP key, Turnstile secret,
+- Secrets in 1Password or an `.env` file: `KD_SIGNING_KEY`, SMTP key, Turnstile secret,
   `DATABASE_URL`.
 
 ## 9. Definition of done (the line chosen)
@@ -145,7 +145,7 @@ rate > 5%.
 ## 11. Explicit non-goals for v1
 
 Federation / pointer-registry mode (Phase 2); transparency log (Phase 3); web encryption UI
-(stays in cipher); passkey/account model (stays in cipher); migration of cipher's existing
+(stays in the hosted app); passkey/account model (same); migration of the hosted app's existing
 `published_keys` table (separate data plane); self-hosted directory federation handshake.
 
 ## 12. Risks

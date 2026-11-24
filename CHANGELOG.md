@@ -14,8 +14,8 @@ Two tag re-cuts during publishing fixed release plumbing, one shipped a version-
 
 ### Changed
 
-- The GHCR image moved from `ghcr.io/madstone-tech/mdstn-cipher` (that name belongs to the
-  closed-source product) to `ghcr.io/madstone-tech/mdstn-cipher-core`.
+- The GHCR image moved from `ghcr.io/madstone-tech/mdstn-cipher` (that name is reserved for
+  the hosted application) to `ghcr.io/madstone-tech/mdstn-cipher-core`.
 - The Homebrew cask's quarantine-removal step now emits Homebrew's `on_macos do …` form;
   the previous cask failed `brew install` with `unknown keyword: :on_macos`.
 - README gained an Install section (Homebrew, checksums-verified download, GHCR image,
