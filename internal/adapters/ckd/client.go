@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -25,14 +26,24 @@ type Client struct {
 	madstoneBaseURL string
 }
 
+// DefaultMadstoneBaseURL is the production hosted directory. Pin here and in
+// docs/ckd-protocol.md; CIPHER_CKD_URL may override it per environment.
+const DefaultMadstoneBaseURL = "https://keys.mdstn.dev"
+
 // NewClient creates a new CKD client
 func NewClient(cache usecases.CKDCacheRepository) *Client {
+	base := DefaultMadstoneBaseURL
+	// CIPHER_CKD_URL overrides the hosted-directory base for non-production
+	// directories (staging, local mode). Blank = the pinned production URL.
+	if env := os.Getenv("CIPHER_CKD_URL"); env != "" {
+		base = env
+	}
 	return &Client{
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 		cache:           cache,
-		madstoneBaseURL: "https://keys.mdstn.dev",
+		madstoneBaseURL: base,
 	}
 }
 
