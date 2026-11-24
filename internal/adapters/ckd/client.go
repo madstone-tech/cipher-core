@@ -30,7 +30,7 @@ func NewClient(cache usecases.CKDCacheRepository) *Client {
 			Timeout: 10 * time.Second,
 		},
 		cache:           cache,
-		madstoneBaseURL: "https://keys.madstone.dev",
+		madstoneBaseURL: "https://keys.mdstn.dev",
 	}
 }
 

@@ -98,7 +98,7 @@ var keysPublishCmd = &cobra.Command{
 This makes your public key discoverable by email, allowing others to
 encrypt files for you using: mdstn-cipher encrypt file.pdf --for you@domain.com
 
-Currently publishes to the Madstone hosted directory (keys.madstone.dev).
+Currently publishes to the hosted directory (keys.mdstn.dev).
 In the future, will support self-hosted CKD servers.
 
 Examples:

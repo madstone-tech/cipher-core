@@ -28,7 +28,7 @@ type Config struct {
 	DBPath string
 
 	// CKDDirectoryURL overrides the CKD central directory base URL
-	// (default: https://keys.madstone.dev). Empty string keeps the default.
+	// (default: https://keys.mdstn.dev). Empty string keeps the default.
 	CKDDirectoryURL string
 
 	// Logger receives structured log output. Defaults to a simple logger
