@@ -11,6 +11,32 @@ import (
 // docs/format-spec.md §Container Version.
 type MdstnFile = entities.EncryptedFile
 
+// RecipientBlock is one per-recipient header entry of a method-2 container
+// (base64 ephemeral public key, nonce, wrapped CEK). Consumers outside the
+// module construct these to build method-2 headers via MdstnFile.Recipients;
+// without this alias an external module cannot name the field's element type.
+type RecipientBlock = entities.RecipientBlock
+
+// WrapCEKAAD is the AES-GCM AAD of a recipient block
+// ("mdstn-cipher/v2/wrap-cek"); pass it to WrapCEK/UnwrapCEK exactly as the
+// core does — an AAD mismatch is indistinguishable from tampering.
+const WrapCEKAAD = entities.WrapCEKAAD
+
+// KDFArgon2id is the method-3 "kdf" header value; FileKDFParams is the only
+// accepted Argon2id parameter set. Consumers writing method-3 headers need
+// both to produce a conforming header.
+const KDFArgon2id = entities.KDFArgon2id
+
+// FileKDFParams is the fixed method-3 Argon2id parameter set (m=65536, t=3,
+// p=4): a hostile header cannot choose different KDF costs.
+var FileKDFParams = entities.FileKDFParams
+
+// FormatVersion is the container version byte, always 3 (0x03).
+const FormatVersion = entities.FormatVersion
+
+// HeaderMACSize is the size of the 32-byte header MAC that starts the body.
+const HeaderMACSize = entities.HeaderMACSize
+
 // MdstnEncoder encodes and decodes .mdstn containers (version 0x03 only).
 type MdstnEncoder = usecases.FileEncoder
 

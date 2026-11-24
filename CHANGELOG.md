@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.2 (2026-11-24)
+
+### Added
+
+- `pkg/cipher` facade re-exports for first-class external container
+  construction: `RecipientBlock`, `WrapCEKAAD`, `KDFArgon2id`,
+  `FileKDFParams`, `FormatVersion`, `HeaderMACSize`. Before this, a module
+  outside cipher-core could not name the `MdstnFile.Recipients` element type
+  or the method-2/3 header constants, so building method-2 or method-3
+  headers from the SDK was impossible. Behavior is unchanged; the release
+  re-cuts binaries only because the Go module surface grew. Consumed by the
+  cipher repo's format-0x03 parity suite (spec 068).
+
 ## v0.3.1 (2026-11-24)
 
 Two tag re-cuts during publishing fixed release plumbing, one shipped a version-reporting fix.
