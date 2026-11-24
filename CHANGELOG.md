@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.1 (2026-11-24)
+
+Two tag re-cuts during publishing fixed release plumbing, one shipped a version-reporting fix.
+
+### Fixed
+
+- `version` subcommand reported "dev" for binaries built by
+  `go install github.com/madstone-tech/cipher-core/cmd/mdstn-cipher@vX.Y.Z` (GoReleaser
+  binaries were never affected: they are stamped via ldflags). The command now falls back to
+  the Go build-info module version when ldflags did not set one; in-module `go build` reports
+  the VCS pseudo-version.
+
+### Changed
+
+- The GHCR image moved from `ghcr.io/madstone-tech/mdstn-cipher` (that name belongs to the
+  closed-source product) to `ghcr.io/madstone-tech/mdstn-cipher-core`.
+- The Homebrew cask's quarantine-removal step now emits Homebrew's `on_macos do …` form;
+  the previous cask failed `brew install` with `unknown keyword: :on_macos`.
+- README gained an Install section (Homebrew, checksums-verified download, GHCR image,
+  `go install`).
+
 ## v0.3.0 (2026-11-08)
 
 This release fixes the findings of the external review of 2026-11-04 (F1-F11), its verification
