@@ -3,7 +3,9 @@ package usecases
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/madstone-tech/cipher-core/internal/core/entities"
 )
@@ -96,14 +98,41 @@ func (uc *ManageKeys) ListKeysMetadata(ctx context.Context, req *ListKeysRequest
 	return &ListKeysMetadataResponse{Keys: keys}, nil
 }
 
-// GetKey retrieves a specific key
+// GetKey retrieves a key by ID, or by full fingerprint when the ID lookup
+// misses (the CLI's other commands accept both spellings — the smoke finding
+// from 2026-11-24).
 func (uc *ManageKeys) GetKey(ctx context.Context, req *GetKeyRequest) (*GetKeyResponse, error) {
 	key, err := uc.keyRepo.GetByID(ctx, req.ID)
+	if err != nil && errors.Is(err, entities.ErrNotFound) {
+		key, err = uc.keyRepo.GetByFingerprint(ctx, req.ID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get key: %w", err)
 	}
 
 	return &GetKeyResponse{Key: key}, nil
+}
+
+// ResolveKeyRef normalizes a user-supplied key reference: a full fingerprint
+// is folded to the key's internal ID so downstream operations that only key
+// off the ID column (ExportKey, AliasKey, DeleteKey) work with either
+// spelling. An ID passes through unchanged. Fingerprints are upper- or
+// lowercase on the client side; the store stores lowercase hex.
+func (uc *ManageKeys) ResolveKeyRef(ctx context.Context, ref string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(ref))
+	if trimmed == "" {
+		return "", entities.ErrNotFound
+	}
+	key, byIDErr := uc.keyRepo.GetByID(ctx, trimmed)
+	if byIDErr == nil {
+		return key.ID, nil
+	}
+	key, byFPErr := uc.keyRepo.GetByFingerprint(ctx, trimmed)
+	if byFPErr == nil {
+		return key.ID, nil
+	}
+	// Report the primary miss; do not stack secondary errors.
+	return "", fmt.Errorf("failed to get key: %w", byIDErr)
 }
 
 // DeleteKey deletes a key

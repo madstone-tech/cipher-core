@@ -31,6 +31,9 @@
 - CIPHER_CKD_URL environment variable overrides the hosted-directory base
   URL for non-production directories (staging, local tests). Blank keeps the
   production pin.
+- `keys export`, `keys alias`, and `keys delete` accept a full fingerprint
+  (upper- or lowercase) as the key reference, not only the internal ID — the
+  same spelling the encrypt recipient positionals accept.
 
 ### Changed
 

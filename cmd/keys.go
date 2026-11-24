@@ -364,13 +364,18 @@ func (c *KeysCommand) Delete(ctx context.Context, keyID string) (retErr error) {
 
 	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
 
+	// Accept ID or fingerprint spellings (smoke finding 2026-11-24).
+	resolvedID, err := manageKeys.ResolveKeyRef(ctx, keyID)
+	if err != nil {
+		return err
+	}
 	if err := manageKeys.DeleteKey(ctx, &usecases.DeleteKeyRequest{
-		ID: keyID,
+		ID: resolvedID,
 	}); err != nil {
 		return err
 	}
 
-	fmt.Printf("✓ Deleted key %s\n", keyID)
+	fmt.Printf("✓ Deleted key %s\n", resolvedID)
 	return nil
 }
 
@@ -387,8 +392,13 @@ func (c *KeysCommand) Alias(ctx context.Context, keyID, alias string) (retErr er
 
 	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
 
+	// Accept ID or fingerprint spellings (smoke finding 2026-11-24).
+	resolvedID, err := manageKeys.ResolveKeyRef(ctx, keyID)
+	if err != nil {
+		return err
+	}
 	if err := manageKeys.AliasKey(ctx, &usecases.AliasKeyRequest{
-		ID:    keyID,
+		ID:    resolvedID,
 		Alias: alias,
 	}); err != nil {
 		return err
@@ -411,8 +421,14 @@ func (c *KeysCommand) Export(ctx context.Context, keyID, keyFormat, outputPath s
 
 	manageKeys := usecases.NewManageKeys(adapters.KeyRepo, adapters.Logger)
 
+	// Accept ID or fingerprint spellings (smoke finding 2026-11-24).
+	resolvedID, err := manageKeys.ResolveKeyRef(ctx, keyID)
+	if err != nil {
+		return err
+	}
+
 	resp, err := manageKeys.ExportKey(ctx, &usecases.ExportKeyRequest{
-		ID:     keyID,
+		ID:     resolvedID,
 		Format: keyFormat,
 	})
 	if err != nil {
