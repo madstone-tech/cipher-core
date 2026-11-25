@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.1 (2026-11-24)
+
+### Added
+
+- `pkg/cipherports.PublishResult`: re-export of the `CKDPublisher.Publish`
+  return type. Without it, a module outside cipher-core could not implement
+  the v0.4.0 `CKDPublisher` port.
+- `pkg/cipher.ErrKDConflict` and `pkg/cipher.ErrKDIntegrity`: the
+  key-directory sentinel errors, so external callers can use `errors.Is`.
+
+Additive only. No behavior changes.
+
 ## v0.4.0 (2026-11-24)
 
 ### Added

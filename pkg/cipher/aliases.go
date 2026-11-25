@@ -72,4 +72,10 @@ var (
 	// ErrInvalidRecipientKey matches a Recipient.PublicKey that is not a
 	// usable X25519 public key (wrong length or a low-order point).
 	ErrInvalidRecipientKey = entities.ErrInvalidRecipientKey
+	// ErrKDConflict matches a key-directory publish or unpublish rejected on
+	// binding-state grounds (current fingerprint required or mismatched).
+	ErrKDConflict = entities.ErrKDConflict
+	// ErrKDIntegrity matches a key-directory response that failed its
+	// integrity check (signature, key id, or unknown key type).
+	ErrKDIntegrity = entities.ErrKDIntegrity
 )

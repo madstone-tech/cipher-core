@@ -184,6 +184,9 @@ type (
 	CKDPublisher = usecases.CKDPublisher
 	// CKDStatusResult is one fingerprint's published state.
 	CKDStatusResult = usecases.CKDStatusResult
+	// PublishResult is a CKDPublisher's publish outcome. External modules
+	// implementing CKDPublisher need it to name the Publish return type.
+	PublishResult = usecases.PublishResult
 	// PublisherConfig resolves the directory publisher inputs (CLI + SDK).
 	PublisherConfig = ckd.PublisherConfig
 	// StoreWrappedKey stores a client-wrapped private key (ZK web flow).
