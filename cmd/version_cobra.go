@@ -21,7 +21,8 @@ func init() {
 	versionCmd.Flags().Bool("json", false, "Output as JSON")
 	rootCmd.AddCommand(versionCmd)
 
-	// Use Cobra's built-in version support for --version on root
+	// Use Cobra's built-in version support for --version on root. The name
+	// follows rootCmd.Use, so consumer binaries that rename the root match.
 	rootCmd.Version = version
-	rootCmd.SetVersionTemplate("mdstn-cipher {{.Version}}\n")
+	rootCmd.SetVersionTemplate("{{.Name}} {{.Version}}\n")
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.2 (unreleased)
+
+### Changed
+
+- `version` and `--version` take the program name from the root command
+  (`GetRootCommand().Use`) instead of the fixed text `mdstn-cipher`. A
+  consumer binary that renames the root (cipher's `cipher-app`) now reports
+  its own name. The `mdstn-cipher` output and the `version --json` fields do
+  not change.
+
 ## v0.4.1 (2026-11-24)
 
 ### Added
