@@ -49,8 +49,10 @@ func (c *VersionCommand) Execute(jsonOutput bool) error {
 		return nil
 	}
 
-	fmt.Printf("mdstn-cipher %s (commit %s, built %s by %s, %s, %s/%s)\n",
-		version, commit, buildTime, builtBy, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+	// The name comes from the root command, so a consumer binary that sets
+	// GetRootCommand().Use (for example cipher-app) reports its own name.
+	fmt.Printf("%s %s (commit %s, built %s by %s, %s, %s/%s)\n",
+		rootCmd.Name(), version, commit, buildTime, builtBy, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	return nil
 }
 
