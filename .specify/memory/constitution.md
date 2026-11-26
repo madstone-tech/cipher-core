@@ -1,10 +1,13 @@
 <!--
 Sync Impact Report
-- Version change: 2.0.0 → 2.0.1 (PATCH: wording)
-- Modified principles: III. One Container Format (records the freeze tag `v0.3.0`)
-- Reason: the first release tag that ships `0x03` is `v0.3.0` (2026-11-08). The freeze rule is
-  unchanged; only the tag is now named.
-- Earlier: 1.0.0 → 2.0.0 (MAJOR, feature 002): `0x01` dropped, one format `0x03`.
+- Version change: 2.0.1 → 2.1.0 (MINOR: material expansion)
+- Modified sections: Security and Platform Constraints ("The build MUST be CGO-free") gains a
+  scope statement and one sanctioned exception for the app framework built from `pkg/mobile`
+  with `gomobile bind`. Principle IV (Stable Public SDK Surface) now also covers `pkg/mobile`.
+- Reason: cipher spec 069 (desktop and mobile apps embed the core through gomobile). gomobile
+  generates cgo glue, which the old wording forbade without exception.
+- Matching amendment: cipher constitution 1.4.0 → 1.5.0 (Principle I).
+- Earlier: 2.0.0 → 2.0.1 (PATCH: freeze tag `v0.3.0`); 1.0.0 → 2.0.0 (MAJOR, feature 002).
 - Added / removed sections: none
 - Deferred TODOs: none
 -->
@@ -49,9 +52,9 @@ Rationale: other implementations depend on byte-exact, stable output.
 
 ### IV. Stable Public SDK Surface
 
-The surface of `pkg/cipher` and `pkg/cipherports` is frozen. Each addition, removal, or signature
-change MUST state its justification and MUST ship with a minor version bump. The public surface
-MUST NOT export methods that always fail.
+The surface of `pkg/cipher`, `pkg/cipherports` and `pkg/mobile` (the app bridge) is frozen. Each
+addition, removal, or signature change MUST state its justification and MUST ship with a minor
+version bump. The public surface MUST NOT export methods that always fail.
 
 Rationale: consumers build against the SDK. Silent breaks and stub methods cost them time.
 
@@ -67,7 +70,12 @@ Rationale: users act on what the tool reports. A wrong error class or partial ou
 
 ## Security and Platform Constraints
 
-- The build MUST be CGO-free. The module has no JS/CSS build pipeline.
+- The build MUST be CGO-free: every package, and the `mdstn-cipher` binary, MUST build with
+  `CGO_ENABLED=0`. The module has no JS/CSS build pipeline.
+- Sanctioned exception: the app framework is built from `pkg/mobile` with `gomobile bind`, which
+  generates its own cgo glue. `pkg/mobile` MUST NOT contain hand-written cgo (`import "C"`), MUST
+  still compile with `CGO_ENABLED=0`, and MUST NOT be imported by `cmd/` or any other package.
+  The framework is a separate release artifact.
 - Observability is opt-in and lives in the consuming application. The core MUST NOT carry telemetry
   dependencies.
 - Inputs from files are untrusted. A parser MUST bound each allocation before it reads the data.
@@ -93,4 +101,4 @@ guidance for contributors and agents, and it MUST stay consistent with this docu
 - Compliance: each plan (`/speckit-plan`) MUST include a Constitution Check against Principles I-V.
   Each review MUST confirm the check.
 
-**Version**: 2.0.1 | **Ratified**: 2026-11-04 | **Last Amended**: 2026-11-08
+**Version**: 2.1.0 | **Ratified**: 2026-11-04 | **Last Amended**: 2026-11-26

@@ -10,8 +10,10 @@ surface, and the public SDK (`pkg/cipher`) + port surface (`pkg/cipherports`).
 
 - **Module:** `github.com/madstone-tech/cipher-core`
 - **Go:** 1.27.1 · **License:** BSL 1.1 (→ Apache 2.0 three years after each release)
-- No CGO. No JS/CSS build pipeline. The format spec lives in `docs/format-spec.md`; the CKD
-  protocol in `docs/ckd-protocol.md`.
+- No CGO (every package builds with `CGO_ENABLED=0`). The one sanctioned exception is the app
+  framework that `gomobile bind` builds from `pkg/mobile`; see the constitution. No JS/CSS build
+  pipeline. The format spec lives in `docs/format-spec.md`; the CKD protocol in
+  `docs/ckd-protocol.md`.
 
 ## Build & test (Taskfile)
 
